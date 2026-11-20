@@ -1686,10 +1686,62 @@ fn decode_utf8_string(data: &[u8]) -> Result<String> {
         return Err(WinedroidError::new("UTF-8 string is not null-terminated"));
     }
 
-    let value = std::str::from_utf8(&data[value_offset..terminator_offset])
-        .map_err(|error| WinedroidError::with_source("invalid UTF-8 string", error))?;
+    decode_string_pool_utf8(&data[value_offset..terminator_offset])
+}
 
-    Ok(value.to_owned())
+// cite: frameworks-base ResourceTypes.cpp#ResStringPool::stringAt, utf8_to_utf16_length, utf8_to_utf16
+pub(crate) fn decode_string_pool_utf8(bytes: &[u8]) -> Result<String> {
+    let mut code_units = Vec::with_capacity(bytes.len());
+    let mut offset = 0;
+
+    while offset < bytes.len() {
+        let sequence_length = utf8_sequence_length(bytes[offset]);
+        let Some(sequence) = bytes.get(offset..offset + sequence_length) else {
+            return Err(WinedroidError::new(
+                "UTF-8 string has a sequence past its byte length",
+            ));
+        };
+        push_utf16_code_units(utf8_sequence_code_point(sequence), &mut code_units);
+        offset += sequence_length;
+    }
+
+    String::from_utf16(&code_units)
+        .map_err(|error| WinedroidError::with_source("invalid UTF-8 string", error))
+}
+
+fn utf8_sequence_length(lead_byte: u8) -> usize {
+    match lead_byte {
+        0x00..=0xbf => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xff => 4,
+    }
+}
+
+fn utf8_sequence_code_point(sequence: &[u8]) -> u32 {
+    let lead_bits = match sequence.len() {
+        1 => return sequence[0] as u32,
+        2 => sequence[0] & 0x1f,
+        3 => sequence[0] & 0x0f,
+        _ => sequence[0] & 0x07,
+    };
+
+    sequence[1..]
+        .iter()
+        .fold(lead_bits as u32, |code_point, byte| {
+            (code_point << 6) | (byte & 0x3f) as u32
+        })
+}
+
+fn push_utf16_code_units(code_point: u32, code_units: &mut Vec<u16>) {
+    if code_point <= 0xffff {
+        code_units.push(code_point as u16);
+        return;
+    }
+
+    let offset = code_point - 0x10000;
+    code_units.push(((offset >> 10) + 0xd800) as u16);
+    code_units.push(((offset & 0x3ff) + 0xdc00) as u16);
 }
 
 fn decode_utf16_string(data: &[u8]) -> Result<String> {
@@ -1777,6 +1829,41 @@ fn require_range(data: &[u8], offset: usize, length: usize, label: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn utf8_pool_string(utf16_length: u8, bytes: &[u8]) -> Vec<u8> {
+        let mut data = vec![utf16_length, bytes.len() as u8];
+        data.extend_from_slice(bytes);
+        data.push(0);
+        data
+    }
+
+    // cite: frameworks-base ResourceTypes.cpp#ResStringPool::stringAt, utf8_to_utf16
+    #[test]
+    fn aosp_utf8_pool_decodes_surrogate_pair_encoded_as_two_three_byte_sequences() {
+        let data = utf8_pool_string(4, &[b'a', b' ', 0xed, 0xa0, 0xbc, 0xed, 0xbe, 0x82]);
+
+        let decoded = decode_utf8_string(&data).expect("CESU-8 surrogate pair should decode");
+
+        assert_eq!(decoded, "a \u{1f382}");
+    }
+
+    // cite: frameworks-base ResourceTypes.cpp#ResStringPool::stringAt, utf8_to_utf16
+    #[test]
+    fn aosp_utf8_pool_decodes_four_byte_sequence_as_surrogate_pair() {
+        let data = utf8_pool_string(2, &[0xf0, 0x9f, 0x8e, 0x82]);
+
+        let decoded = decode_utf8_string(&data).expect("four-byte sequence should decode");
+
+        assert_eq!(decoded, "\u{1f382}");
+    }
+
+    // cite: frameworks-base ResourceTypes.cpp#ResStringPool::stringAt, utf8_to_utf16_length
+    #[test]
+    fn aosp_utf8_pool_rejects_sequence_past_byte_length() {
+        let data = utf8_pool_string(2, &[b'a', 0xe2, 0x82]);
+
+        assert!(decode_utf8_string(&data).is_err());
+    }
 
     #[test]
     fn reads_resource_table_package_count() {
