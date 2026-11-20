@@ -653,10 +653,7 @@ fn decode_utf8_string(data: &[u8]) -> Result<String> {
         return Err(WinedroidError::new("UTF-8 string is not null-terminated"));
     }
 
-    let value = std::str::from_utf8(&data[value_offset..terminator_offset])
-        .map_err(|error| WinedroidError::with_source("invalid UTF-8 string", error))?;
-
-    Ok(value.to_owned())
+    crate::resource_table::decode_string_pool_utf8(&data[value_offset..terminator_offset])
 }
 
 fn decode_utf16_string(data: &[u8]) -> Result<String> {
