@@ -336,6 +336,111 @@ impl DexProgram {
             return Some(DexExecutionResult::Void);
         }
 
+        // cite: libcore Arrays.java#fill
+        if method.class_descriptor == "Ljava/util/Arrays;"
+            && method.name == "fill"
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "([BB)V" | "([SS)V" | "([CC)V" | "([II)V" | "([ZZ)V" | "([JJ)V"
+            )
+        {
+            let invocation = invocation?;
+            let array = invocation.arguments.first()?;
+            let fill_val = invocation.arguments.get(1)?.clone();
+            let array_key = map_identity_key(array);
+            let mut runtime = self.runtime.borrow_mut();
+            let entries = runtime.array_entries.get_mut(&array_key)?;
+            for slot in entries.iter_mut() {
+                *slot = fill_val.clone();
+            }
+
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: libcore Arrays.java#fill
+        if method.class_descriptor == "Ljava/util/Arrays;"
+            && method.name == "fill"
+            && method
+                .proto
+                .descriptor_is("([Ljava/lang/Object;Ljava/lang/Object;)V")
+        {
+            let invocation = invocation?;
+            let array = invocation.arguments.first()?;
+            let fill_val = invocation.arguments.get(1)?.clone();
+            let array_key = map_identity_key(array);
+            let mut runtime = self.runtime.borrow_mut();
+            let entries = runtime.array_entries.get_mut(&array_key)?;
+            for slot in entries.iter_mut() {
+                *slot = fill_val.clone();
+            }
+
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: libcore AbstractMap.java#SimpleImmutableEntry
+        if matches!(
+            method.class_descriptor.as_str(),
+            "Ljava/util/AbstractMap$SimpleImmutableEntry;" | "Ljava/util/AbstractMap$SimpleEntry;"
+        ) && method.name == "<init>"
+            && method
+                .proto
+                .descriptor_is("(Ljava/lang/Object;Ljava/lang/Object;)V")
+        {
+            let invocation = invocation?;
+            let receiver = invocation.arguments.first()?;
+            let key = invocation.arguments.get(1)?.clone();
+            let value = invocation.arguments.get(2)?.clone();
+            self.write_stored_instance_field_by_signature(
+                receiver,
+                "Ljava/util/AbstractMap$SimpleImmutableEntry;.key:Ljava/lang/Object;",
+                key,
+            );
+            self.write_stored_instance_field_by_signature(
+                receiver,
+                "Ljava/util/AbstractMap$SimpleImmutableEntry;.value:Ljava/lang/Object;",
+                value,
+            );
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: libcore Map.java#getKey, getValue
+        if matches!(
+            method.class_descriptor.as_str(),
+            "Ljava/util/Map$Entry;"
+                | "Ljava/util/AbstractMap$SimpleImmutableEntry;"
+                | "Ljava/util/AbstractMap$SimpleEntry;"
+        ) && method.name == "getKey"
+            && method.proto.descriptor_is("()Ljava/lang/Object;")
+        {
+            let invocation = invocation?;
+            let receiver = invocation.arguments.first()?;
+            if let Some(value) = self.read_stored_instance_field_by_signature(
+                receiver,
+                "Ljava/util/AbstractMap$SimpleImmutableEntry;.key:Ljava/lang/Object;",
+            ) {
+                return Some(DexExecutionResult::Value(value));
+            }
+        }
+
+        // cite: libcore Map.java#getKey, getValue
+        if matches!(
+            method.class_descriptor.as_str(),
+            "Ljava/util/Map$Entry;"
+                | "Ljava/util/AbstractMap$SimpleImmutableEntry;"
+                | "Ljava/util/AbstractMap$SimpleEntry;"
+        ) && method.name == "getValue"
+            && method.proto.descriptor_is("()Ljava/lang/Object;")
+        {
+            let invocation = invocation?;
+            let receiver = invocation.arguments.first()?;
+            if let Some(value) = self.read_stored_instance_field_by_signature(
+                receiver,
+                "Ljava/util/AbstractMap$SimpleImmutableEntry;.value:Ljava/lang/Object;",
+            ) {
+                return Some(DexExecutionResult::Value(value));
+            }
+        }
+
         if method.class_descriptor == "Ljava/util/Arrays;"
             && method.name == "equals"
             && method
@@ -402,6 +507,46 @@ impl DexProgram {
             let value = self.arrays_copy_of_long(invocation)?;
 
             return Some(DexExecutionResult::Value(value));
+        }
+
+        // cite: libcore Arrays.java#sort
+        if method.class_descriptor == "Ljava/util/Arrays;"
+            && method.name == "sort"
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "([Ljava/lang/Object;)V" | "([Ljava/lang/Object;II)V"
+            )
+        {
+            let invocation = invocation?;
+            let array_key = map_identity_key(invocation.arguments.first()?);
+            let mut entries = self
+                .runtime
+                .borrow()
+                .array_entries
+                .get(&array_key)
+                .cloned()?;
+            let (from, to) = if invocation.arguments.len() == 3 {
+                let DexValue::Int(f) = invocation.arguments[1] else {
+                    return None;
+                };
+                let DexValue::Int(t) = invocation.arguments[2] else {
+                    return None;
+                };
+                (
+                    usize::try_from(f).ok()?.min(entries.len()),
+                    usize::try_from(t).ok()?.min(entries.len()),
+                )
+            } else {
+                (0, entries.len())
+            };
+            if from < to {
+                entries[from..to].sort_by(|a, b| self.tree_map_compare_keys(a, b));
+            }
+            self.runtime
+                .borrow_mut()
+                .array_entries
+                .insert(array_key, entries);
+            return Some(DexExecutionResult::Void);
         }
 
         if method.class_descriptor == "Ljava/util/Collections;"
@@ -891,6 +1036,58 @@ impl DexProgram {
             return Some(DexExecutionResult::Void);
         }
 
+        // cite: libcore TreeMap.java#ceilingEntry, floorEntry, higherEntry, lowerEntry, firstEntry, lastEntry, ceilingKey, floorKey, firstKey, lastKey
+        if method.class_descriptor == "Ljava/util/TreeMap;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("ceilingEntry", "(Ljava/lang/Object;)Ljava/util/Map$Entry;")
+                | ("floorEntry", "(Ljava/lang/Object;)Ljava/util/Map$Entry;")
+                | ("higherEntry", "(Ljava/lang/Object;)Ljava/util/Map$Entry;")
+                | ("lowerEntry", "(Ljava/lang/Object;)Ljava/util/Map$Entry;") => {
+                    let invocation = invocation?;
+                    let receiver = invocation.arguments.first()?;
+                    let target = invocation.arguments.get(1)?;
+                    let entry = self.tree_map_navigable_entry(receiver, Some(target), &method.name);
+                    return Some(DexExecutionResult::Value(entry));
+                }
+                ("firstEntry", "()Ljava/util/Map$Entry;")
+                | ("lastEntry", "()Ljava/util/Map$Entry;") => {
+                    let invocation = invocation?;
+                    let receiver = invocation.arguments.first()?;
+                    let entry = self.tree_map_navigable_entry(receiver, None, &method.name);
+                    return Some(DexExecutionResult::Value(entry));
+                }
+                ("ceilingKey", "(Ljava/lang/Object;)Ljava/lang/Object;")
+                | ("floorKey", "(Ljava/lang/Object;)Ljava/lang/Object;") => {
+                    let invocation = invocation?;
+                    let receiver = invocation.arguments.first()?;
+                    let target = invocation.arguments.get(1)?;
+                    let op = if method.name == "ceilingKey" {
+                        "ceilingEntry"
+                    } else {
+                        "floorEntry"
+                    };
+                    let key = self
+                        .tree_map_navigable_pair(receiver, Some(target), op)
+                        .map_or(DexValue::Null, |(k, _)| k);
+                    return Some(DexExecutionResult::Value(key));
+                }
+                ("firstKey", "()Ljava/lang/Object;") | ("lastKey", "()Ljava/lang/Object;") => {
+                    let invocation = invocation?;
+                    let receiver = invocation.arguments.first()?;
+                    let op = if method.name == "firstKey" {
+                        "firstEntry"
+                    } else {
+                        "lastEntry"
+                    };
+                    let key = self
+                        .tree_map_navigable_pair(receiver, None, op)
+                        .map_or(DexValue::Null, |(k, _)| k);
+                    return Some(DexExecutionResult::Value(key));
+                }
+                _ => {}
+            }
+        }
+
         if is_supported_map_implementation_class(&method.class_descriptor)
             && method.name == "<init>"
             && method.proto.descriptor_is("(I)V")
@@ -1000,6 +1197,66 @@ impl DexProgram {
                 self.array_deque_add_last(invocation).ok()??;
                 return Some(DexExecutionResult::Void);
             }
+            if matches!(method.name.as_str(), "poll" | "pollFirst")
+                && method.proto.descriptor_is("()Ljava/lang/Object;")
+            {
+                // cite: libcore ArrayDeque.java#poll, pollFirst
+                let invocation = invocation?;
+                let key = map_identity_key(invocation.arguments.first()?);
+                let value = self
+                    .runtime
+                    .borrow_mut()
+                    .list_entries
+                    .get_mut(&key)
+                    .and_then(|entries| {
+                        if entries.is_empty() {
+                            None
+                        } else {
+                            Some(entries.remove(0))
+                        }
+                    })
+                    .unwrap_or(DexValue::Null);
+                return Some(DexExecutionResult::Value(value));
+            }
+            if matches!(method.name.as_str(), "peek" | "peekFirst")
+                && method.proto.descriptor_is("()Ljava/lang/Object;")
+            {
+                // cite: libcore ArrayDeque.java#peek, peekFirst
+                let invocation = invocation?;
+                let key = map_identity_key(invocation.arguments.first()?);
+                let value = self
+                    .runtime
+                    .borrow()
+                    .list_entries
+                    .get(&key)
+                    .and_then(|entries| entries.first().cloned())
+                    .unwrap_or(DexValue::Null);
+                return Some(DexExecutionResult::Value(value));
+            }
+            if method.name == "isEmpty" && method.proto.descriptor_is("()Z") {
+                // cite: libcore ArrayDeque.java#isEmpty
+                let invocation = invocation?;
+                let key = map_identity_key(invocation.arguments.first()?);
+                let empty = self
+                    .runtime
+                    .borrow()
+                    .list_entries
+                    .get(&key)
+                    .map_or(true, Vec::is_empty);
+                return Some(DexExecutionResult::Int(i32::from(empty)));
+            }
+            if method.name == "size" && method.proto.descriptor_is("()I") {
+                // cite: libcore ArrayDeque.java#size
+                let invocation = invocation?;
+                let key = map_identity_key(invocation.arguments.first()?);
+                let size = self
+                    .runtime
+                    .borrow()
+                    .list_entries
+                    .get(&key)
+                    .map_or(0, Vec::len);
+                return Some(DexExecutionResult::Int(size as i32));
+            }
         }
 
         if method.class_descriptor == "Ljava/util/concurrent/CopyOnWriteArraySet;"
@@ -1037,6 +1294,132 @@ impl DexProgram {
         }
 
         None
+    }
+
+    fn tree_map_navigable_entry(
+        &self,
+        receiver: &DexValue,
+        target: Option<&DexValue>,
+        op: &str,
+    ) -> DexValue {
+        let Some((key, value)) = self.tree_map_navigable_pair(receiver, target, op) else {
+            return DexValue::Null;
+        };
+        let mut runtime = self.runtime.borrow_mut();
+        let entry_id = runtime.next_object_id;
+        runtime.next_object_id += 1;
+        let entry_ref = format!("Ljava/util/Map$Entry;:treemap:{entry_id}");
+        runtime
+            .map_entry_objects
+            .insert(entry_ref.clone(), (key, value));
+        DexValue::Reference(std::rc::Rc::from(entry_ref))
+    }
+
+    fn tree_map_navigable_pair(
+        &self,
+        receiver: &DexValue,
+        target: Option<&DexValue>,
+        op: &str,
+    ) -> Option<(DexValue, DexValue)> {
+        let source_map_key = map_identity_key(receiver);
+        let mut entries = Vec::new();
+        {
+            let runtime = self.runtime.borrow();
+            for ((map_key, entry_key), value) in &runtime.map_entries {
+                if map_key != &source_map_key {
+                    continue;
+                }
+                if let Some(key) = runtime
+                    .map_entry_keys
+                    .get(&(map_key.clone(), entry_key.clone()))
+                {
+                    entries.push((key.clone(), value.clone()));
+                }
+            }
+        }
+        entries.sort_by(|a, b| self.tree_map_compare_keys(&a.0, &b.0));
+        match op {
+            "firstEntry" => entries.into_iter().next(),
+            "lastEntry" => entries.into_iter().next_back(),
+            "ceilingEntry" => {
+                let target = target?;
+                entries.into_iter().find(|(k, _)| {
+                    self.tree_map_compare_keys(k, target) != std::cmp::Ordering::Less
+                })
+            }
+            "higherEntry" => {
+                let target = target?;
+                entries.into_iter().find(|(k, _)| {
+                    self.tree_map_compare_keys(k, target) == std::cmp::Ordering::Greater
+                })
+            }
+            "floorEntry" => {
+                let target = target?;
+                entries.into_iter().rev().find(|(k, _)| {
+                    self.tree_map_compare_keys(k, target) != std::cmp::Ordering::Greater
+                })
+            }
+            "lowerEntry" => {
+                let target = target?;
+                entries.into_iter().rev().find(|(k, _)| {
+                    self.tree_map_compare_keys(k, target) == std::cmp::Ordering::Less
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn tree_map_compare_keys(&self, left: &DexValue, right: &DexValue) -> std::cmp::Ordering {
+        if let (Some(l), Some(r)) = (
+            self.tree_map_numeric_key(left),
+            self.tree_map_numeric_key(right),
+        ) {
+            return l.cmp(&r);
+        }
+        if let (Some(l), Some(r)) = (self.string_text(left), self.string_text(right)) {
+            return l.cmp(&r);
+        }
+        map_identity_key(left).cmp(&map_identity_key(right))
+    }
+
+    fn tree_map_numeric_key(&self, value: &DexValue) -> Option<i64> {
+        match value {
+            DexValue::Int(v) => Some(*v as i64),
+            DexValue::Long(v) => Some(*v),
+            DexValue::Reference(reference) => {
+                if let Some(rest) = reference.strip_prefix("Ljava/lang/Integer;:") {
+                    rest.parse::<i64>().ok()
+                } else if let Some(rest) = reference.strip_prefix("Ljava/lang/Long;:") {
+                    rest.parse::<i64>().ok()
+                } else {
+                    None
+                }
+            }
+            DexValue::Object(object) => {
+                if object.class_descriptor.as_ref() == "Ljava/lang/Integer;" {
+                    let field = DexFieldId {
+                        class_descriptor: "Ljava/lang/Integer;".to_owned(),
+                        type_descriptor: "I".to_owned(),
+                        name: "value".to_owned(),
+                    };
+                    if let Some(DexValue::Int(v)) = self.read_stored_instance_field(value, &field) {
+                        return Some(v as i64);
+                    }
+                } else if object.class_descriptor.as_ref() == "Ljava/lang/Long;" {
+                    let field = DexFieldId {
+                        class_descriptor: "Ljava/lang/Long;".to_owned(),
+                        type_descriptor: "J".to_owned(),
+                        name: "value".to_owned(),
+                    };
+                    if let Some(DexValue::Long(v)) = self.read_stored_instance_field(value, &field)
+                    {
+                        return Some(v);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 }
 

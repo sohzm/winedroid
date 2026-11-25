@@ -208,6 +208,22 @@ pub(super) fn bootstrap_superclass_descriptor(class_descriptor: &str) -> Option<
         "Ljava/lang/IllegalAccessException;" => Some("Ljava/lang/ReflectiveOperationException;"),
         // cite: libcore ClassNotFoundException.java#ClassNotFoundException
         "Ljava/lang/ClassNotFoundException;" => Some("Ljava/lang/ReflectiveOperationException;"),
+        // cite: frameworks-base VectorDrawable.java#VectorDrawable
+        "Landroid/graphics/drawable/VectorDrawable;"
+        | "Landroid/graphics/drawable/BitmapDrawable;"
+        | "Landroid/graphics/drawable/GradientDrawable;"
+        | "Landroid/graphics/drawable/LayerDrawable;"
+        | "Landroid/graphics/drawable/InsetDrawable;" => {
+            Some("Landroid/graphics/drawable/Drawable;")
+        }
+        // cite: libcore NoSuchMethodException.java#NoSuchMethodException
+        "Ljava/lang/NoSuchMethodException;" => Some("Ljava/lang/ReflectiveOperationException;"),
+        // cite: libcore NoSuchFieldException.java#NoSuchFieldException
+        "Ljava/lang/NoSuchFieldException;" => Some("Ljava/lang/ReflectiveOperationException;"),
+        // cite: libcore InvocationTargetException.java#InvocationTargetException
+        "Ljava/lang/reflect/InvocationTargetException;" => {
+            Some("Ljava/lang/ReflectiveOperationException;")
+        }
         "Ljava/lang/RuntimeException;" => Some("Ljava/lang/Exception;"),
         // cite: frameworks-base Resources.java#NotFoundException
         "Landroid/content/res/Resources$NotFoundException;" => Some("Ljava/lang/RuntimeException;"),
@@ -417,6 +433,16 @@ pub(super) fn bootstrap_direct_interface_descriptors(
         "Landroid/database/CrossProcessCursor;" => &["Landroid/database/Cursor;"],
         // cite: frameworks-base OnBackAnimationCallback.java#OnBackAnimationCallback
         "Landroid/window/OnBackAnimationCallback;" => &["Landroid/window/OnBackInvokedCallback;"],
+        // cite: libcore ExecutorService.java#ExecutorService
+        "Ljava/util/concurrent/ExecutorService;" => &["Ljava/util/concurrent/Executor;"],
+        // cite: libcore ScheduledExecutorService.java#ScheduledExecutorService
+        "Ljava/util/concurrent/ScheduledExecutorService;" => {
+            &["Ljava/util/concurrent/ExecutorService;"]
+        }
+        // cite: libcore AbstractExecutorService.java#AbstractExecutorService
+        "Ljava/util/concurrent/AbstractExecutorService;" => {
+            &["Ljava/util/concurrent/ExecutorService;"]
+        }
         _ => &[],
     }
 }
@@ -445,6 +471,8 @@ pub(super) fn is_bootstrap_interface_descriptor(class_descriptor: &str) -> bool 
             | "Ljava/util/Set;"
             | "Ljava/util/concurrent/Executor;"
             | "Ljava/util/concurrent/ExecutorService;"
+            // cite: libcore ScheduledExecutorService.java#ScheduledExecutorService
+            | "Ljava/util/concurrent/ScheduledExecutorService;"
             | "Ljava/util/concurrent/Future;"
             // cite: frameworks-base OnBackAnimationCallback.java#OnBackAnimationCallback
             | "Landroid/window/OnBackAnimationCallback;"

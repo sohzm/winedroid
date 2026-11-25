@@ -860,6 +860,72 @@ impl DexProgram {
             return Some(DexExecutionResult::Void);
         }
 
+        // cite: frameworks-base TextView.java#getTransformationMethod
+        if is_text_view_class(&method.class_descriptor)
+            && method.name == "getTransformationMethod"
+            && method
+                .proto
+                .descriptor_is("()Landroid/text/method/TransformationMethod;")
+        {
+            return Some(DexExecutionResult::Value(DexValue::Null));
+        }
+
+        // cite: frameworks-base TextView.java#setCompoundDrawablePadding
+        if is_text_view_class(&method.class_descriptor)
+            && method.name == "setCompoundDrawablePadding"
+            && method.proto.descriptor_is("(I)V")
+        {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base TextView.java#getCompoundDrawablesRelative, getCompoundDrawables
+        if is_text_view_class(&method.class_descriptor)
+            && matches!(
+                method.name.as_str(),
+                "getCompoundDrawablesRelative" | "getCompoundDrawables"
+            )
+            && method
+                .proto
+                .descriptor_is("()[Landroid/graphics/drawable/Drawable;")
+        {
+            let array = self.allocate_filled_array(
+                "[Landroid/graphics/drawable/Drawable;".to_owned(),
+                vec![
+                    DexValue::Null,
+                    DexValue::Null,
+                    DexValue::Null,
+                    DexValue::Null,
+                ],
+            );
+            return Some(DexExecutionResult::Value(array));
+        }
+
+        // cite: frameworks-base TextView.java#getLayout
+        if is_text_view_class(&method.class_descriptor)
+            && method.name == "getLayout"
+            && method.proto.descriptor_is("()Landroid/text/Layout;")
+        {
+            return Some(DexExecutionResult::Value(DexValue::Null));
+        }
+
+        // cite: frameworks-base TextView.java#getMaxLines
+        if is_text_view_class(&method.class_descriptor)
+            && method.name == "getMaxLines"
+            && method.proto.descriptor_is("()I")
+        {
+            return Some(DexExecutionResult::Int(i32::MAX));
+        }
+
+        // cite: frameworks-base TextView.java#setTextColor
+        if is_text_view_class(&method.class_descriptor)
+            && method.name == "setTextColor"
+            && method
+                .proto
+                .descriptor_is("(Landroid/content/res/ColorStateList;)V")
+        {
+            return Some(DexExecutionResult::Void);
+        }
+
         if method.class_descriptor == "Landroid/widget/TextView;"
             && method.name == "setCursorVisible"
             && method.proto.descriptor_is("(Z)V")

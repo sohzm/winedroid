@@ -3518,7 +3518,7 @@ fn builtin_configuration_constructor_returns_void() {
     );
     assert_eq!(
         program.read_stored_instance_field(&default_receiver, &ui_mode_field),
-        // cite: frameworks-base UiModeManagerService.java#updateConfigurationLocked
+        // cite: frameworks-base UiModeManager.java#MODE_NIGHT_NO
         Some(DexValue::Int(0x11))
     );
     assert_eq!(

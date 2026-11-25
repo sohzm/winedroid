@@ -19,8 +19,16 @@ pub struct AndroidManifest {
     pub min_sdk_version: Option<String>,
     pub target_sdk_version: Option<String>,
     pub uses_sdk_declared: bool,
+    pub shared_user_id: Option<String>,
+    pub split_name: Option<String>,
+    pub is_feature_split: bool,
     pub permissions: Vec<UsesPermission>,
     pub activities: Vec<Activity>,
+    pub services: Vec<ServiceComponent>,
+    pub receivers: Vec<ReceiverComponent>,
+    pub providers: Vec<ProviderComponent>,
+    pub uses_libraries: Vec<UsesLibrary>,
+    pub application_meta_data: Vec<MetaData>,
     pub application_label: Option<u32>,
     pub request_legacy_external_storage: Option<bool>,
     pub default_to_device_protected_storage: Option<bool>,
@@ -58,12 +66,12 @@ impl AndroidManifest {
     }
 
     pub fn defaults_to_device_protected_storage(&self, is_system_app: bool) -> bool {
-        // cite: frameworks-base ScanPackageUtils.java#applyPolicy
+        // cite: frameworks-base ApplicationInfo.java#PRIVATE_FLAG_DEFAULT_TO_DEVICE_PROTECTED_STORAGE, PRIVATE_FLAG_DIRECT_BOOT_AWARE
         is_system_app && self.default_to_device_protected_storage.unwrap_or(false)
     }
 
     pub fn is_direct_boot_aware(&self, is_system_app: bool) -> bool {
-        // cite: frameworks-base ScanPackageUtils.java#applyPolicy
+        // cite: frameworks-base ApplicationInfo.java#PRIVATE_FLAG_DEFAULT_TO_DEVICE_PROTECTED_STORAGE, PRIVATE_FLAG_DIRECT_BOOT_AWARE
         is_system_app && self.direct_boot_aware.unwrap_or(false)
     }
 
@@ -145,6 +153,61 @@ impl fmt::Display for UsesPermission {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IntentFilter {
+    pub actions: Vec<String>,
+    pub categories: Vec<String>,
+    pub schemes: Vec<String>,
+    pub authorities: Vec<String>,
+    pub mime_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetaData {
+    pub name: String,
+    pub value: Option<String>,
+    pub resource: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceComponent {
+    pub name: String,
+    pub exported: Option<bool>,
+    pub enabled: Option<bool>,
+    pub permission: Option<String>,
+    pub process: Option<String>,
+    pub intent_filters: Vec<IntentFilter>,
+    pub meta_data: Vec<MetaData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiverComponent {
+    pub name: String,
+    pub exported: Option<bool>,
+    pub enabled: Option<bool>,
+    pub permission: Option<String>,
+    pub intent_filters: Vec<IntentFilter>,
+    pub meta_data: Vec<MetaData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderComponent {
+    pub name: String,
+    pub authorities: Vec<String>,
+    pub exported: Option<bool>,
+    pub enabled: Option<bool>,
+    pub read_permission: Option<String>,
+    pub write_permission: Option<String>,
+    pub grant_uri_permissions: bool,
+    pub meta_data: Vec<MetaData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsesLibrary {
+    pub name: String,
+    pub required: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Activity {
     pub name: String,
@@ -156,6 +219,8 @@ pub struct Activity {
     pub has_launcher_category: bool,
     pub label: Option<u32>,
     pub theme: Option<u32>,
+    pub intent_filters: Vec<IntentFilter>,
+    pub meta_data: Vec<MetaData>,
 }
 
 impl Activity {
@@ -176,6 +241,8 @@ struct ActivityBuilder {
     has_launcher_category: bool,
     label: Option<u32>,
     theme: Option<u32>,
+    intent_filters: Vec<IntentFilter>,
+    meta_data: Vec<MetaData>,
 }
 
 impl ActivityBuilder {
@@ -190,6 +257,8 @@ impl ActivityBuilder {
             has_launcher_category: self.has_launcher_category,
             label: self.label,
             theme: self.theme,
+            intent_filters: self.intent_filters,
+            meta_data: self.meta_data,
         }
     }
 }
@@ -199,52 +268,30 @@ pub fn parse_manifest(data: &[u8]) -> Result<AndroidManifest> {
     parse_events(&events)
 }
 
+#[derive(Default)]
+struct ManifestParseState {
+    current_activity: Option<ActivityBuilder>,
+    current_service: Option<ServiceComponent>,
+    current_receiver: Option<ReceiverComponent>,
+    current_provider: Option<ProviderComponent>,
+    current_intent_filter: Option<IntentFilter>,
+    application_seen: bool,
+    application_is_primary: bool,
+}
+
 fn parse_events(events: &[XmlEvent]) -> Result<AndroidManifest> {
     let mut manifest = AndroidManifest::default();
     let mut element_stack = Vec::new();
-    let mut current_activity = None;
-    let mut in_intent_filter = false;
-    let mut application_seen = false;
-    let mut application_is_primary = false;
+    let mut state = ManifestParseState::default();
 
     for event in events {
         match event {
             XmlEvent::Start(element) => {
-                handle_start_element(
-                    &mut manifest,
-                    &mut current_activity,
-                    &mut in_intent_filter,
-                    &mut application_seen,
-                    &mut application_is_primary,
-                    &element_stack,
-                    element,
-                )?;
-
+                handle_start_element(&mut manifest, &mut state, &element_stack, element)?;
                 element_stack.push((element.name.clone(), element.namespace.clone()));
             }
             XmlEvent::End(element) => {
-                if element.name == "intent-filter" && path_ends_in_intent_filter(&element_stack) {
-                    in_intent_filter = false;
-                }
-
-                if is_activity_element(&element.name)
-                    && (path_is(&element_stack, &["manifest", "application", "activity"])
-                        || path_is(
-                            &element_stack,
-                            &["manifest", "application", "activity-alias"],
-                        ))
-                {
-                    if let Some(activity) = current_activity.take() {
-                        manifest.activities.push(activity.finish());
-                    }
-                }
-
-                if element.name == "application"
-                    && path_is(&element_stack, &["manifest", "application"])
-                {
-                    application_is_primary = false;
-                }
-
+                handle_end_element(&mut manifest, &mut state, &element_stack, element);
                 pop_element(
                     &mut element_stack,
                     &element.name,
@@ -259,17 +306,81 @@ fn parse_events(events: &[XmlEvent]) -> Result<AndroidManifest> {
     manifest
         .activities
         .sort_by(|left, right| left.name.cmp(&right.name));
+    manifest
+        .services
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    manifest
+        .receivers
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    manifest
+        .providers
+        .sort_by(|left, right| left.name.cmp(&right.name));
     manifest.effective_target_sdk_version()?;
 
     Ok(manifest)
 }
 
+fn handle_end_element(
+    manifest: &mut AndroidManifest,
+    state: &mut ManifestParseState,
+    element_stack: &[(String, Option<String>)],
+    element: &crate::binary_xml::XmlEndElement,
+) {
+    if element.name == "intent-filter" && path_ends_in_intent_filter(element_stack) {
+        if let Some(filter) = state.current_intent_filter.take() {
+            if let Some(activity) = &mut state.current_activity {
+                activity.intent_filters.push(filter);
+            } else if let Some(service) = &mut state.current_service {
+                service.intent_filters.push(filter);
+            } else if let Some(receiver) = &mut state.current_receiver {
+                receiver.intent_filters.push(filter);
+            }
+        }
+    }
+
+    if is_activity_element(&element.name)
+        && (path_is(element_stack, &["manifest", "application", "activity"])
+            || path_is(
+                element_stack,
+                &["manifest", "application", "activity-alias"],
+            ))
+    {
+        if let Some(activity) = state.current_activity.take() {
+            manifest.activities.push(activity.finish());
+        }
+    }
+
+    if element.name == "service" && path_is(element_stack, &["manifest", "application", "service"])
+    {
+        if let Some(service) = state.current_service.take() {
+            manifest.services.push(service);
+        }
+    }
+
+    if element.name == "receiver"
+        && path_is(element_stack, &["manifest", "application", "receiver"])
+    {
+        if let Some(receiver) = state.current_receiver.take() {
+            manifest.receivers.push(receiver);
+        }
+    }
+
+    if element.name == "provider"
+        && path_is(element_stack, &["manifest", "application", "provider"])
+    {
+        if let Some(provider) = state.current_provider.take() {
+            manifest.providers.push(provider);
+        }
+    }
+
+    if element.name == "application" && path_is(element_stack, &["manifest", "application"]) {
+        state.application_is_primary = false;
+    }
+}
+
 fn handle_start_element(
     manifest: &mut AndroidManifest,
-    current_activity: &mut Option<ActivityBuilder>,
-    in_intent_filter: &mut bool,
-    application_seen: &mut bool,
-    application_is_primary: &mut bool,
+    state: &mut ManifestParseState,
     element_stack: &[(String, Option<String>)],
     element: &XmlStartElement,
 ) -> Result<()> {
@@ -277,12 +388,12 @@ fn handle_start_element(
     match element.name.as_str() {
         "manifest" if element_stack.is_empty() => read_manifest_attributes(manifest, element),
         "application" if path_is(element_stack, &["manifest"]) => {
-            if *application_seen {
-                *application_is_primary = false;
+            if state.application_seen {
+                state.application_is_primary = false;
                 return Ok(());
             }
-            *application_seen = true;
-            *application_is_primary = true;
+            state.application_seen = true;
+            state.application_is_primary = true;
             read_application(manifest, element)?
         }
         "uses-sdk" if path_is(element_stack, &["manifest"]) => {
@@ -293,26 +404,96 @@ fn handle_start_element(
         {
             read_permission(manifest, element)?
         }
+        "uses-library"
+            if state.application_is_primary
+                && path_is(element_stack, &["manifest", "application"]) =>
+        {
+            // cite: frameworks-base PackageParser.java#parseBaseApplication
+            if let Some(lib) = read_uses_library(element) {
+                manifest.uses_libraries.push(lib);
+            }
+        }
         "activity" | "activity-alias"
-            if *application_is_primary && path_is(element_stack, &["manifest", "application"]) =>
+            if state.application_is_primary
+                && path_is(element_stack, &["manifest", "application"]) =>
         {
-            *current_activity = read_activity(manifest, element);
+            state.current_activity = read_activity(manifest, element);
         }
-        "intent-filter"
-            if current_activity.is_some()
-                && (path_is(element_stack, &["manifest", "application", "activity"])
-                    || path_is(
-                        element_stack,
-                        &["manifest", "application", "activity-alias"],
-                    )) =>
+        "service"
+            if state.application_is_primary
+                && path_is(element_stack, &["manifest", "application"]) =>
         {
-            *in_intent_filter = true;
+            // cite: frameworks-base PackageParser.java#parseService
+            state.current_service = read_service(manifest, element);
         }
-        "action" if *in_intent_filter && path_ends_in_intent_filter(element_stack) => {
-            read_action(current_activity, element);
+        "receiver"
+            if state.application_is_primary
+                && path_is(element_stack, &["manifest", "application"]) =>
+        {
+            // cite: frameworks-base PackageParser.java#parseBaseApplication
+            state.current_receiver = read_receiver(manifest, element);
         }
-        "category" if *in_intent_filter && path_ends_in_intent_filter(element_stack) => {
-            read_category(current_activity, element);
+        "provider"
+            if state.application_is_primary
+                && path_is(element_stack, &["manifest", "application"]) =>
+        {
+            // cite: frameworks-base PackageParser.java#parseProvider
+            state.current_provider = read_provider(manifest, element);
+        }
+        "meta-data" if state.application_is_primary => {
+            // cite: frameworks-base PackageParser.java#parseMetaData
+            if let Some(meta) = read_meta_data(element) {
+                if path_is(element_stack, &["manifest", "application"]) {
+                    manifest.application_meta_data.push(meta);
+                } else if let Some(activity) = &mut state.current_activity {
+                    if path_is(element_stack, &["manifest", "application", "activity"])
+                        || path_is(
+                            element_stack,
+                            &["manifest", "application", "activity-alias"],
+                        )
+                    {
+                        activity.meta_data.push(meta);
+                    }
+                } else if let Some(service) = &mut state.current_service {
+                    if path_is(element_stack, &["manifest", "application", "service"]) {
+                        service.meta_data.push(meta);
+                    }
+                } else if let Some(receiver) = &mut state.current_receiver {
+                    if path_is(element_stack, &["manifest", "application", "receiver"]) {
+                        receiver.meta_data.push(meta);
+                    }
+                } else if let Some(provider) = &mut state.current_provider {
+                    if path_is(element_stack, &["manifest", "application", "provider"]) {
+                        provider.meta_data.push(meta);
+                    }
+                }
+            }
+        }
+        "intent-filter" if state.application_is_primary && path_is_component(element_stack) => {
+            if state.current_activity.is_some()
+                || state.current_service.is_some()
+                || state.current_receiver.is_some()
+            {
+                state.current_intent_filter = Some(IntentFilter::default());
+            }
+        }
+        "action"
+            if state.current_intent_filter.is_some()
+                && path_ends_in_intent_filter(element_stack) =>
+        {
+            read_action(state, element);
+        }
+        "category"
+            if state.current_intent_filter.is_some()
+                && path_ends_in_intent_filter(element_stack) =>
+        {
+            read_category(state, element);
+        }
+        "data"
+            if state.current_intent_filter.is_some()
+                && path_ends_in_intent_filter(element_stack) =>
+        {
+            read_intent_filter_data(state, element);
         }
         _ => {}
     }
@@ -322,6 +503,10 @@ fn handle_start_element(
 
 fn read_manifest_attributes(manifest: &mut AndroidManifest, element: &XmlStartElement) {
     manifest.package_name = unnamespaced_text_attribute(element, "package");
+    manifest.split_name = unnamespaced_text_attribute(element, "split");
+    // cite: frameworks-base PackageParser.java#parseBaseApkCommon
+    manifest.shared_user_id = text_attribute(element, "sharedUserId");
+    manifest.is_feature_split = bool_attribute(element, "isFeatureSplit").unwrap_or(false);
     manifest.version_code = text_attribute(element, "versionCode");
     manifest.version_name = text_attribute(element, "versionName");
     manifest.compile_sdk_version = text_attribute(element, "compileSdkVersion");
@@ -428,6 +613,85 @@ fn read_activity(manifest: &AndroidManifest, element: &XmlStartElement) -> Optio
         has_launcher_category: false,
         label: reference_attribute(element, "label"),
         theme: reference_attribute(element, "theme"),
+        intent_filters: Vec::new(),
+        meta_data: Vec::new(),
+    })
+}
+
+fn read_service(manifest: &AndroidManifest, element: &XmlStartElement) -> Option<ServiceComponent> {
+    // cite: frameworks-base PackageParser.java#parseService
+    let name = text_attribute(element, "name")?;
+    Some(ServiceComponent {
+        name: resolve_component_name(manifest.package_name.as_deref(), &name),
+        exported: bool_attribute(element, "exported"),
+        enabled: bool_attribute(element, "enabled"),
+        permission: text_attribute(element, "permission"),
+        process: text_attribute(element, "process"),
+        intent_filters: Vec::new(),
+        meta_data: Vec::new(),
+    })
+}
+
+fn read_receiver(
+    manifest: &AndroidManifest,
+    element: &XmlStartElement,
+) -> Option<ReceiverComponent> {
+    // cite: frameworks-base PackageParser.java#parseBaseApplication
+    let name = text_attribute(element, "name")?;
+    Some(ReceiverComponent {
+        name: resolve_component_name(manifest.package_name.as_deref(), &name),
+        exported: bool_attribute(element, "exported"),
+        enabled: bool_attribute(element, "enabled"),
+        permission: text_attribute(element, "permission"),
+        intent_filters: Vec::new(),
+        meta_data: Vec::new(),
+    })
+}
+
+fn read_provider(
+    manifest: &AndroidManifest,
+    element: &XmlStartElement,
+) -> Option<ProviderComponent> {
+    // cite: frameworks-base PackageParser.java#parseProvider
+    let name = text_attribute(element, "name")?;
+    let authorities = text_attribute(element, "authorities")
+        .map(|raw| {
+            raw.split(';')
+                .filter(|item| !item.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ProviderComponent {
+        name: resolve_component_name(manifest.package_name.as_deref(), &name),
+        authorities,
+        exported: bool_attribute(element, "exported"),
+        enabled: bool_attribute(element, "enabled"),
+        read_permission: text_attribute(element, "readPermission"),
+        write_permission: text_attribute(element, "writePermission"),
+        grant_uri_permissions: bool_attribute(element, "grantUriPermissions").unwrap_or(false),
+        meta_data: Vec::new(),
+    })
+}
+
+fn read_uses_library(element: &XmlStartElement) -> Option<UsesLibrary> {
+    // cite: frameworks-base PackageParser.java#parseBaseApplication
+    let name = text_attribute(element, "name")?;
+    Some(UsesLibrary {
+        name,
+        required: bool_attribute(element, "required").unwrap_or(true),
+    })
+}
+
+fn read_meta_data(element: &XmlStartElement) -> Option<MetaData> {
+    // cite: frameworks-base PackageParser.java#parseMetaData
+    let name = text_attribute(element, "name")?;
+    let resource = reference_attribute(element, "resource");
+    let value = text_attribute(element, "value");
+    Some(MetaData {
+        name,
+        value,
+        resource,
     })
 }
 
@@ -438,27 +702,50 @@ fn reference_attribute(element: &XmlStartElement, name: &str) -> Option<u32> {
     }
 }
 
-fn read_action(current_activity: &mut Option<ActivityBuilder>, element: &XmlStartElement) {
+fn read_action(state: &mut ManifestParseState, element: &XmlStartElement) {
     let Some(action_name) = text_attribute(element, "name") else {
         return;
     };
 
+    if let Some(filter) = &mut state.current_intent_filter {
+        filter.actions.push(action_name.clone());
+    }
+
     if action_name == ACTION_MAIN {
-        if let Some(activity) = current_activity {
+        if let Some(activity) = &mut state.current_activity {
             activity.has_main_action = true;
         }
     }
 }
 
-fn read_category(current_activity: &mut Option<ActivityBuilder>, element: &XmlStartElement) {
+fn read_category(state: &mut ManifestParseState, element: &XmlStartElement) {
     let Some(category_name) = text_attribute(element, "name") else {
         return;
     };
 
+    if let Some(filter) = &mut state.current_intent_filter {
+        filter.categories.push(category_name.clone());
+    }
+
     if category_name == CATEGORY_LAUNCHER {
-        if let Some(activity) = current_activity {
+        if let Some(activity) = &mut state.current_activity {
             activity.has_launcher_category = true;
         }
+    }
+}
+
+fn read_intent_filter_data(state: &mut ManifestParseState, element: &XmlStartElement) {
+    let Some(filter) = &mut state.current_intent_filter else {
+        return;
+    };
+    if let Some(scheme) = text_attribute(element, "scheme") {
+        filter.schemes.push(scheme);
+    }
+    if let Some(host) = text_attribute(element, "host") {
+        filter.authorities.push(host);
+    }
+    if let Some(mime_type) = text_attribute(element, "mimeType") {
+        filter.mime_types.push(mime_type);
     }
 }
 
@@ -572,6 +859,16 @@ fn path_is(element_stack: &[(String, Option<String>)], expected: &[&str]) -> boo
             .all(|((name, _), expected)| name == expected)
 }
 
+fn path_is_component(element_stack: &[(String, Option<String>)]) -> bool {
+    path_is(element_stack, &["manifest", "application", "activity"])
+        || path_is(
+            element_stack,
+            &["manifest", "application", "activity-alias"],
+        )
+        || path_is(element_stack, &["manifest", "application", "service"])
+        || path_is(element_stack, &["manifest", "application", "receiver"])
+}
+
 fn path_ends_in_intent_filter(element_stack: &[(String, Option<String>)]) -> bool {
     path_is(
         element_stack,
@@ -579,6 +876,12 @@ fn path_ends_in_intent_filter(element_stack: &[(String, Option<String>)]) -> boo
     ) || path_is(
         element_stack,
         &["manifest", "application", "activity-alias", "intent-filter"],
+    ) || path_is(
+        element_stack,
+        &["manifest", "application", "service", "intent-filter"],
+    ) || path_is(
+        element_stack,
+        &["manifest", "application", "receiver", "intent-filter"],
     )
 }
 
@@ -1077,8 +1380,7 @@ mod tests {
 
     #[test]
     fn scan_package_policy_keeps_ordinary_app_contexts_credential_protected() {
-        // cite: frameworks-base ParsingPackageUtils.java#parseBaseAppBasicFlags
-        // cite: frameworks-base ScanPackageUtils.java#applyPolicy
+        // cite: frameworks-base ApplicationInfo.java#PRIVATE_FLAG_DEFAULT_TO_DEVICE_PROTECTED_STORAGE, PRIVATE_FLAG_DIRECT_BOOT_AWARE
         let declared = parse_events(&[
             start("manifest", Vec::new()),
             start(
@@ -1230,6 +1532,120 @@ mod tests {
             namespace: Some(ANDROID_NAMESPACE.to_owned()),
             value: XmlValue::Integer(value),
         }
+    }
+
+    #[test]
+    fn parses_services_receivers_providers_uses_library_and_meta_data() {
+        // cite: frameworks-base PackageParser.java#parseBaseApkCommon, parseBaseApplication, parseService, parseProvider, parseMetaData
+        let manifest = parse_events(&[
+            start(
+                "manifest",
+                vec![
+                    manifest_attr("package", "com.google.android.gms"),
+                    manifest_attr("split", "config.x86_64"),
+                    text_attr("sharedUserId", "com.google.uid.shared"),
+                    bool_attr("isFeatureSplit", true),
+                ],
+            ),
+            start(
+                "application",
+                vec![text_attr("name", ".common.app.GmsApplication")],
+            ),
+            start(
+                "uses-library",
+                vec![
+                    text_attr("name", "org.apache.http.legacy"),
+                    bool_attr("required", false),
+                ],
+            ),
+            end("uses-library"),
+            start(
+                "meta-data",
+                vec![
+                    text_attr("name", "com.google.android.gms.version"),
+                    text_attr("value", "252432036"),
+                ],
+            ),
+            end("meta-data"),
+            start(
+                "service",
+                vec![
+                    text_attr("name", ".chimera.GmsBoundBrokerService"),
+                    bool_attr("exported", true),
+                    text_attr("process", ":persistent"),
+                ],
+            ),
+            start("intent-filter", Vec::new()),
+            start(
+                "action",
+                vec![text_attr("name", "com.google.android.gms.BIND")],
+            ),
+            end("action"),
+            end("intent-filter"),
+            end("service"),
+            start(
+                "receiver",
+                vec![text_attr("name", ".checkin.CheckinReceiver")],
+            ),
+            start("intent-filter", Vec::new()),
+            start(
+                "action",
+                vec![text_attr("name", "android.intent.action.BOOT_COMPLETED")],
+            ),
+            end("action"),
+            end("intent-filter"),
+            end("receiver"),
+            start(
+                "provider",
+                vec![
+                    text_attr("name", ".gservices.GservicesProvider"),
+                    text_attr(
+                        "authorities",
+                        "com.google.android.gsf.gservices;com.google.settings",
+                    ),
+                    bool_attr("grantUriPermissions", true),
+                ],
+            ),
+            end("provider"),
+            end("application"),
+            end("manifest"),
+        ])
+        .expect("full component manifest should parse");
+
+        assert_eq!(
+            manifest.shared_user_id.as_deref(),
+            Some("com.google.uid.shared")
+        );
+        assert_eq!(manifest.split_name.as_deref(), Some("config.x86_64"));
+        assert!(manifest.is_feature_split);
+        assert_eq!(manifest.uses_libraries.len(), 1);
+        assert_eq!(manifest.uses_libraries[0].name, "org.apache.http.legacy");
+        assert!(!manifest.uses_libraries[0].required);
+        assert_eq!(manifest.application_meta_data.len(), 1);
+        assert_eq!(
+            manifest.application_meta_data[0].name,
+            "com.google.android.gms.version"
+        );
+        assert_eq!(manifest.services.len(), 1);
+        assert_eq!(
+            manifest.services[0].name,
+            "com.google.android.gms.chimera.GmsBoundBrokerService"
+        );
+        assert_eq!(
+            manifest.services[0].intent_filters[0].actions,
+            vec!["com.google.android.gms.BIND"]
+        );
+        assert_eq!(manifest.receivers.len(), 1);
+        assert_eq!(
+            manifest.receivers[0].name,
+            "com.google.android.gms.checkin.CheckinReceiver"
+        );
+        assert_eq!(manifest.providers.len(), 1);
+        assert_eq!(
+            manifest.providers[0].authorities,
+            vec!["com.google.android.gsf.gservices", "com.google.settings"]
+        );
+        assert!(manifest.providers[0].grant_uri_permissions);
     }
 
     fn reference_attr(name: &str, value: u32) -> XmlAttribute {

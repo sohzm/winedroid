@@ -608,23 +608,48 @@ impl DexProgram {
             self.ensure_application_initialized(depth)?;
         }
 
+        // cite: frameworks-base Activity.java#performCreate
         let resolved = {
             let _span = trace::span("runtime", "resolve Activity.onCreate");
-            self.resolve_named_method(class_descriptor, "onCreate")?
+            match self.resolve_named_method(class_descriptor, "onCreate") {
+                Ok(found) => found,
+                Err(initial_error) => {
+                    let mut current = self.superclass_descriptor(class_descriptor);
+                    let mut inherited = None;
+                    let on_create_proto = crate::dex::DexProto {
+                        shorty: "VL".to_owned(),
+                        return_type: "V".to_owned(),
+                        parameters: vec!["Landroid/os/Bundle;".to_owned()],
+                    };
+                    while let Some(super_desc) = current {
+                        let candidate = DexMethodId {
+                            class_descriptor: super_desc.clone(),
+                            name: "onCreate".to_owned(),
+                            proto: on_create_proto.clone(),
+                        };
+                        if let Some(found) = self.resolve_exact_method(&candidate)? {
+                            inherited = Some((*found).clone());
+                            break;
+                        }
+                        current = self.superclass_descriptor(&super_desc);
+                    }
+                    inherited.ok_or(initial_error)?
+                }
+            }
         };
         let initial_arguments = {
             let _span = trace::span("runtime", "prepare Activity.onCreate arguments");
-            self.prepare_entrypoint_initial_arguments(&resolved)?
+            self.prepare_entrypoint_initial_arguments_for_class(class_descriptor, &resolved)?
         };
         let activity_receiver = activity_receiver_argument(&initial_arguments)?;
         let method_signature = resolved.method.display_signature();
 
         self.push_activity(
-            resolved.class_descriptor.clone(),
+            class_descriptor.to_owned(),
             activity_receiver.clone(),
             method_signature.clone(),
         );
-        self.apply_manifest_activity_theme(&resolved.class_descriptor, &activity_receiver);
+        self.apply_manifest_activity_theme(class_descriptor, &activity_receiver);
         let result = {
             let _span = trace::span("runtime", "execute Activity.onCreate method");
             self.execute_method(None, &resolved, initial_arguments.as_deref(), depth)?
@@ -638,6 +663,27 @@ impl DexProgram {
                     "Activity onCreate parked without a guest-thread scheduler\nclass: {}\nmethod: {}",
                     resolved.class_descriptor, method_signature
                 )));
+            }
+            DexExecutionResult::Throw(exception) => {
+                let detail_field = DexFieldId {
+                    class_descriptor: "Ljava/lang/Throwable;".to_owned(),
+                    type_descriptor: "Ljava/lang/String;".to_owned(),
+                    name: "detailMessage".to_owned(),
+                };
+                let detail = self
+                    .read_stored_instance_field(&exception, &detail_field)
+                    .and_then(|value| self.string_text(&value));
+                let message = match detail {
+                    Some(detail) => format!(
+                        "Activity onCreate returned a value\nclass: {}\nmethod: {}\nresult: throw {}\nmessage: {}",
+                        resolved.class_descriptor, method_signature, exception, detail
+                    ),
+                    None => format!(
+                        "Activity onCreate returned a value\nclass: {}\nmethod: {}\nresult: throw {}",
+                        resolved.class_descriptor, method_signature, exception
+                    ),
+                };
+                return Err(WinedroidError::new(message));
             }
             result => {
                 return Err(WinedroidError::new(format!(
@@ -771,12 +817,35 @@ impl DexProgram {
             | DexExecutionResult::Throw(_) => {}
         }
 
-        Err(WinedroidError::new(format!(
-            "Activity lifecycle callback returned a value\nclass: {}\nmethod: {}\nresult: {}",
-            resolved.class_descriptor,
-            resolved.method.display_signature(),
-            result
-        )))
+        let detail = match &result {
+            DexExecutionResult::Throw(exception) => self
+                .read_stored_instance_field(
+                    exception,
+                    &DexFieldId {
+                        class_descriptor: "Ljava/lang/Throwable;".to_owned(),
+                        type_descriptor: "Ljava/lang/String;".to_owned(),
+                        name: "detailMessage".to_owned(),
+                    },
+                )
+                .and_then(|v| self.string_text(&v)),
+            _ => None,
+        };
+        let message = match detail {
+            Some(detail) => format!(
+                "Activity lifecycle callback returned a value\nclass: {}\nmethod: {}\nresult: {}\nmessage: {}",
+                resolved.class_descriptor,
+                resolved.method.display_signature(),
+                result,
+                detail
+            ),
+            None => format!(
+                "Activity lifecycle callback returned a value\nclass: {}\nmethod: {}\nresult: {}",
+                resolved.class_descriptor,
+                resolved.method.display_signature(),
+                result
+            ),
+        };
+        Err(WinedroidError::new(message))
     }
 
     pub(in crate::dex_run) fn register_activity_lifecycle_callback(

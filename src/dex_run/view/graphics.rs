@@ -3162,7 +3162,7 @@ impl DexProgram {
         .then_some(())
     }
 
-    fn initialize_paint(&self, paint: &DexValue, flags: i32) -> Option<()> {
+    pub(in crate::dex_run) fn initialize_paint(&self, paint: &DexValue, flags: i32) -> Option<()> {
         if !dex_value_is_object_like(paint) {
             return None;
         }

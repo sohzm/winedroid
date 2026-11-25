@@ -17,6 +17,19 @@ impl DexProgram {
             return Some(DexExecutionResult::Value(value));
         }
 
+        // cite: libcore Boolean.java#parseBoolean
+        if method.matches_builtin_signature(
+            "Ljava/lang/Boolean;",
+            "parseBoolean",
+            "(Ljava/lang/String;)Z",
+        ) {
+            let invocation = invocation?;
+            let result = self
+                .string_text(invocation.arguments.first()?)
+                .is_some_and(|s| s.eq_ignore_ascii_case("true"));
+            return Some(DexExecutionResult::Int(i32::from(result)));
+        }
+
         if method.matches_builtin_signature("Ljava/lang/Boolean;", "booleanValue", "()Z") {
             let invocation = invocation?;
             let value = boolean_boolean_value(invocation)?;
@@ -175,6 +188,40 @@ impl DexProgram {
             let value = self.integer_int_value(invocation)?;
 
             return Some(DexExecutionResult::Int(value));
+        }
+
+        // cite: libcore Integer.java#longValue
+        if method.matches_builtin_signature("Ljava/lang/Integer;", "longValue", "()J") {
+            let invocation = invocation?;
+            let value = self.integer_int_value(invocation)?;
+
+            return Some(DexExecutionResult::Value(DexValue::Long(i64::from(value))));
+        }
+
+        // cite: libcore Byte.java#valueOf
+        if method.matches_builtin_signature("Ljava/lang/Byte;", "valueOf", "(B)Ljava/lang/Byte;") {
+            let invocation = invocation?;
+            let DexValue::Int(raw) = invocation.arguments.first()? else {
+                return None;
+            };
+            let byte_val = (*raw as i8) as i32;
+            return Some(DexExecutionResult::Value(DexValue::Reference(
+                std::rc::Rc::from(format!("Ljava/lang/Byte;:{byte_val}")),
+            )));
+        }
+
+        // cite: libcore Byte.java#byteValue
+        if method.matches_builtin_signature("Ljava/lang/Byte;", "byteValue", "()B") {
+            let invocation = invocation?;
+            let value = match invocation.arguments.first()? {
+                DexValue::Reference(reference) => reference
+                    .strip_prefix("Ljava/lang/Byte;:")?
+                    .parse::<i32>()
+                    .ok()?,
+                DexValue::Int(raw) => (*raw as i8) as i32,
+                _ => return None,
+            };
+            return Some(DexExecutionResult::Int((value as i8) as i32));
         }
 
         if method.matches_builtin_signature("Ljava/lang/Number;", "intValue", "()I") {
@@ -359,11 +406,39 @@ impl DexProgram {
             return Some(DexExecutionResult::Value(DexValue::Long(value)));
         }
 
+        // cite: libcore Locale.java#Locale
+        if method.class_descriptor == "Ljava/util/Locale;"
+            && method.name == "<init>"
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "(Ljava/lang/String;)V"
+                    | "(Ljava/lang/String;Ljava/lang/String;)V"
+                    | "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"
+            )
+        {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: libcore Float.java#parseFloat
         if method.matches_builtin_signature(
-            "Ljava/util/Locale;",
-            "getDefault",
-            "()Ljava/util/Locale;",
+            "Ljava/lang/Float;",
+            "parseFloat",
+            "(Ljava/lang/String;)F",
         ) {
+            let invocation = invocation?;
+            let text = self.string_text(invocation.arguments.first()?)?;
+            let value = text.trim().parse::<f32>().ok()?;
+            return Some(DexExecutionResult::Value(DexValue::Float(value)));
+        }
+
+        // cite: libcore Locale.java#getDefault
+        if method.class_descriptor == "Ljava/util/Locale;"
+            && method.name == "getDefault"
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "()Ljava/util/Locale;" | "(Ljava/util/Locale$Category;)Ljava/util/Locale;"
+            )
+        {
             return Some(DexExecutionResult::Value(DexValue::Reference(
                 std::rc::Rc::from("Ljava/util/Locale;:default"),
             )));

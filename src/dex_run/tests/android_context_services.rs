@@ -21,7 +21,7 @@ fn builtin_context_get_system_service_returns_named_reference() {
     assert_eq!(
         program.invoke_builtin_method(&method, Some(&invocation)),
         Some(DexExecutionResult::Value(DexValue::Reference(
-            std::rc::Rc::from("Landroid/content/SystemService;:connectivity")
+            std::rc::Rc::from("Landroid/net/ConnectivityManager;:connectivity")
         )))
     );
 }

@@ -185,9 +185,40 @@ impl DexProgram {
             return Some(DexExecutionResult::Void);
         }
 
+        // cite: libcore ReentrantReadWriteLock.java#ReentrantReadWriteLock, readLock, writeLock
+        if method.class_descriptor == "Ljava/util/concurrent/locks/ReentrantReadWriteLock;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("<init>", "()V") | ("<init>", "(Z)V") => {
+                    return Some(DexExecutionResult::Void);
+                }
+                (
+                    "readLock",
+                    "()Ljava/util/concurrent/locks/ReentrantReadWriteLock$ReadLock;"
+                    | "()Ljava/util/concurrent/locks/Lock;",
+                ) => {
+                    return Some(DexExecutionResult::Value(self.allocate_object(
+                        "Ljava/util/concurrent/locks/ReentrantReadWriteLock$ReadLock;".to_owned(),
+                    )));
+                }
+                (
+                    "writeLock",
+                    "()Ljava/util/concurrent/locks/ReentrantReadWriteLock$WriteLock;"
+                    | "()Ljava/util/concurrent/locks/Lock;",
+                ) => {
+                    return Some(DexExecutionResult::Value(self.allocate_object(
+                        "Ljava/util/concurrent/locks/ReentrantReadWriteLock$WriteLock;".to_owned(),
+                    )));
+                }
+                _ => {}
+            }
+        }
+
         if matches!(
             method.class_descriptor.as_str(),
-            "Ljava/util/concurrent/locks/Lock;" | "Ljava/util/concurrent/locks/ReentrantLock;"
+            "Ljava/util/concurrent/locks/Lock;"
+                | "Ljava/util/concurrent/locks/ReentrantLock;"
+                | "Ljava/util/concurrent/locks/ReentrantReadWriteLock$ReadLock;"
+                | "Ljava/util/concurrent/locks/ReentrantReadWriteLock$WriteLock;"
         ) && matches!(method.name.as_str(), "lock" | "unlock")
             && method.proto.descriptor_is("()V")
         {
@@ -196,11 +227,45 @@ impl DexProgram {
 
         if matches!(
             method.class_descriptor.as_str(),
-            "Ljava/util/concurrent/locks/Lock;" | "Ljava/util/concurrent/locks/ReentrantLock;"
+            "Ljava/util/concurrent/locks/Lock;"
+                | "Ljava/util/concurrent/locks/ReentrantLock;"
+                | "Ljava/util/concurrent/locks/ReentrantReadWriteLock$ReadLock;"
+                | "Ljava/util/concurrent/locks/ReentrantReadWriteLock$WriteLock;"
         ) && method.name == "tryLock"
             && method.proto.descriptor_is("()Z")
         {
             return Some(DexExecutionResult::Int(1));
+        }
+
+        // cite: libcore SynchronousQueue.java#SynchronousQueue
+        if method.class_descriptor == "Ljava/util/concurrent/SynchronousQueue;"
+            && method.name == "<init>"
+            && matches!(method.proto.descriptor().as_str(), "()V" | "(Z)V")
+        {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: libcore ConcurrentLinkedQueue.java#ConcurrentLinkedQueue
+        if method.matches_builtin_signature(
+            "Ljava/util/concurrent/ConcurrentLinkedQueue;",
+            "<init>",
+            "()V",
+        ) {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: libcore ThreadPoolExecutor.java#ThreadPoolExecutor
+        if method.class_descriptor == "Ljava/util/concurrent/ThreadPoolExecutor;"
+            && method.name == "<init>"
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "(IIJLjava/util/concurrent/TimeUnit;Ljava/util/concurrent/BlockingQueue;)V"
+                    | "(IIJLjava/util/concurrent/TimeUnit;Ljava/util/concurrent/BlockingQueue;Ljava/util/concurrent/ThreadFactory;)V"
+                    | "(IIJLjava/util/concurrent/TimeUnit;Ljava/util/concurrent/BlockingQueue;Ljava/util/concurrent/RejectedExecutionHandler;)V"
+                    | "(IIJLjava/util/concurrent/TimeUnit;Ljava/util/concurrent/BlockingQueue;Ljava/util/concurrent/ThreadFactory;Ljava/util/concurrent/RejectedExecutionHandler;)V"
+            )
+        {
+            return Some(DexExecutionResult::Void);
         }
 
         if method.matches_builtin_signature(
@@ -764,6 +829,31 @@ impl DexProgram {
             return Some(DexExecutionResult::Int(value));
         }
 
+        // cite: libcore Unsafe.java#getUnsafe
+        if method.matches_builtin_signature("Lsun/misc/Unsafe;", "getUnsafe", "()Lsun/misc/Unsafe;")
+        {
+            return Some(DexExecutionResult::Value(DexValue::Reference(
+                std::rc::Rc::from("Lsun/misc/Unsafe;:theUnsafe"),
+            )));
+        }
+
+        // cite: libcore AbstractExecutorService.java#AbstractExecutorService
+        if method.matches_builtin_signature(
+            "Ljava/util/concurrent/AbstractExecutorService;",
+            "<init>",
+            "()V",
+        ) {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: libcore LinkedBlockingQueue.java#LinkedBlockingQueue
+        if method.class_descriptor == "Ljava/util/concurrent/LinkedBlockingQueue;"
+            && method.name == "<init>"
+            && matches!(method.proto.descriptor().as_str(), "()V" | "(I)V")
+        {
+            return Some(DexExecutionResult::Void);
+        }
+
         if method.matches_builtin_signature(
             "Lsun/misc/Unsafe;",
             "objectFieldOffset",
@@ -786,26 +876,125 @@ impl DexProgram {
             return Some(DexExecutionResult::Int(value));
         }
 
+        // cite: libcore Unsafe.java#compareAndSwapInt
         if method.matches_builtin_signature(
             "Lsun/misc/Unsafe;",
-            "putObjectVolatile",
-            "(Ljava/lang/Object;JLjava/lang/Object;)V",
+            "compareAndSwapInt",
+            "(Ljava/lang/Object;JII)Z",
         ) {
+            let invocation = invocation?;
+            let value = self.unsafe_compare_and_swap_int(invocation)?;
+
+            return Some(DexExecutionResult::Int(value));
+        }
+
+        // cite: libcore Unsafe.java#compareAndSwapLong
+        if method.matches_builtin_signature(
+            "Lsun/misc/Unsafe;",
+            "compareAndSwapLong",
+            "(Ljava/lang/Object;JJJ)Z",
+        ) {
+            let invocation = invocation?;
+            let value = self.unsafe_compare_and_swap_long(invocation)?;
+
+            return Some(DexExecutionResult::Int(value));
+        }
+
+        // cite: libcore Unsafe.java#arrayBaseOffset
+        if method.matches_builtin_signature(
+            "Lsun/misc/Unsafe;",
+            "arrayBaseOffset",
+            "(Ljava/lang/Class;)I",
+        ) {
+            let invocation = invocation?;
+            let value = self.unsafe_array_base_offset(invocation)?;
+
+            return Some(DexExecutionResult::Int(value));
+        }
+
+        // cite: libcore Unsafe.java#arrayIndexScale
+        if method.matches_builtin_signature(
+            "Lsun/misc/Unsafe;",
+            "arrayIndexScale",
+            "(Ljava/lang/Class;)I",
+        ) {
+            let invocation = invocation?;
+            let value = self.unsafe_array_index_scale(invocation)?;
+
+            return Some(DexExecutionResult::Int(value));
+        }
+
+        // cite: libcore Unsafe.java#putObjectVolatile, putObject, putOrderedObject
+        if method.class_descriptor == "Lsun/misc/Unsafe;"
+            && matches!(
+                method.name.as_str(),
+                "putObjectVolatile" | "putObject" | "putOrderedObject"
+            )
+            && method
+                .proto
+                .descriptor_is("(Ljava/lang/Object;JLjava/lang/Object;)V")
+        {
             let invocation = invocation?;
             self.unsafe_put_object_volatile(invocation)?;
 
             return Some(DexExecutionResult::Void);
         }
 
-        if method.matches_builtin_signature(
-            "Lsun/misc/Unsafe;",
-            "getObjectVolatile",
-            "(Ljava/lang/Object;J)Ljava/lang/Object;",
-        ) {
+        // cite: libcore Unsafe.java#getObjectVolatile, getObject
+        if method.class_descriptor == "Lsun/misc/Unsafe;"
+            && matches!(method.name.as_str(), "getObjectVolatile" | "getObject")
+            && method
+                .proto
+                .descriptor_is("(Ljava/lang/Object;J)Ljava/lang/Object;")
+        {
             let invocation = invocation?;
             let value = self.unsafe_get_object_volatile(invocation)?;
 
             return Some(DexExecutionResult::Value(value));
+        }
+
+        // cite: libcore Unsafe.java#putLong, putLongVolatile
+        if method.class_descriptor == "Lsun/misc/Unsafe;"
+            && matches!(method.name.as_str(), "putLong" | "putLongVolatile")
+            && method.proto.descriptor_is("(Ljava/lang/Object;JJ)V")
+        {
+            let invocation = invocation?;
+            self.unsafe_put_long(invocation)?;
+
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: libcore Unsafe.java#getLong, getLongVolatile
+        if method.class_descriptor == "Lsun/misc/Unsafe;"
+            && matches!(method.name.as_str(), "getLong" | "getLongVolatile")
+            && method.proto.descriptor_is("(Ljava/lang/Object;J)J")
+        {
+            let invocation = invocation?;
+            let value = self.unsafe_get_long(invocation)?;
+
+            return Some(DexExecutionResult::Value(DexValue::Long(value)));
+        }
+
+        // cite: libcore Unsafe.java#putInt, putIntVolatile
+        if method.class_descriptor == "Lsun/misc/Unsafe;"
+            && matches!(method.name.as_str(), "putInt" | "putIntVolatile")
+            && method.proto.descriptor_is("(Ljava/lang/Object;JI)V")
+        {
+            let invocation = invocation?;
+            self.unsafe_put_int(invocation)?;
+
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: libcore Unsafe.java#getInt, getIntVolatile
+        if method.class_descriptor == "Lsun/misc/Unsafe;"
+            && matches!(method.name.as_str(), "getInt" | "getIntVolatile")
+            && method.proto.descriptor_is("(Ljava/lang/Object;J)I")
+        {
+            let invocation = invocation?;
+            let value = self.unsafe_get_int(invocation)?;
+
+            return Some(DexExecutionResult::Int(value));
         }
 
         if method.matches_builtin_signature(

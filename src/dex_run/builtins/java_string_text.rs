@@ -26,6 +26,169 @@ impl DexProgram {
             return Some(DexExecutionResult::Void);
         }
 
+        // cite: libcore String.java#trim
+        if method.class_descriptor == "Ljava/lang/String;"
+            && method.name == "trim"
+            && method.proto.descriptor_is("()Ljava/lang/String;")
+        {
+            let invocation = invocation?;
+            let text = self.string_text(invocation.arguments.first()?)?;
+            let trimmed = text.trim_matches(|ch: char| ch <= ' ');
+            return Some(DexExecutionResult::Value(DexValue::String(
+                std::rc::Rc::from(trimmed.to_owned()),
+            )));
+        }
+
+        if method.class_descriptor == "Ljava/lang/String;"
+            && method.name == "<init>"
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "([BIILjava/nio/charset/Charset;)V"
+                    | "([BLjava/nio/charset/Charset;)V"
+                    | "([BII)V"
+                    | "([B)V"
+            )
+        {
+            // cite: libcore String.java#String
+            let invocation = invocation?;
+            let (offset, length) = if invocation.arguments.len() >= 4 {
+                let DexValue::Int(off) = invocation.arguments[2] else {
+                    return None;
+                };
+                let DexValue::Int(len) = invocation.arguments[3] else {
+                    return None;
+                };
+                (usize::try_from(off).ok()?, Some(usize::try_from(len).ok()?))
+            } else {
+                (0, None)
+            };
+            let array_key = map_identity_key(&invocation.arguments[1]);
+            let bytes: Vec<u8> = {
+                let runtime = self.runtime.borrow();
+                let entries = runtime.array_entries.get(&array_key)?;
+                let len = length.unwrap_or(entries.len().saturating_sub(offset));
+                let end = offset.checked_add(len)?;
+                if end > entries.len() {
+                    return None;
+                }
+                entries[offset..end]
+                    .iter()
+                    .map(|v| match v {
+                        DexValue::Int(b) => *b as u8,
+                        _ => 0,
+                    })
+                    .collect()
+            };
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let key = map_identity_key(&invocation.arguments[0]);
+            self.runtime.borrow_mut().string_values.insert(key, text);
+
+            return Some(DexExecutionResult::Void);
+        }
+
+        if method.matches_builtin_signature(
+            "Ljava/text/Normalizer;",
+            "normalize",
+            "(Ljava/lang/CharSequence;Ljava/text/Normalizer$Form;)Ljava/lang/String;",
+        ) {
+            // cite: libcore Normalizer.java#normalize
+            let invocation = invocation?;
+            let text = self.char_sequence_text(invocation.arguments.first()?)?;
+            return Some(DexExecutionResult::Value(DexValue::String(
+                std::rc::Rc::from(text),
+            )));
+        }
+
+        if method.class_descriptor == "Ljava/lang/String;"
+            && method.name == "getBytes"
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "()[B" | "(Ljava/nio/charset/Charset;)[B" | "(Ljava/lang/String;)[B"
+            )
+        {
+            // cite: libcore String.java#getBytes
+            let invocation = invocation?;
+            let text = self.string_text(invocation.arguments.first()?)?;
+            let elements: Vec<DexValue> = text
+                .into_bytes()
+                .into_iter()
+                .map(|b| DexValue::Int((b as i8) as i32))
+                .collect();
+            return Some(DexExecutionResult::Value(
+                self.allocate_filled_array("[B".to_owned(), elements),
+            ));
+        }
+
+        if method.class_descriptor == "Ljava/lang/String;"
+            && method.name == "regionMatches"
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "(ZILjava/lang/String;II)Z" | "(ILjava/lang/String;II)Z"
+            )
+        {
+            // cite: libcore String.java#regionMatches
+            let invocation = invocation?;
+            let (ignore_case, toffset, other_arg, ooffset, len) = if invocation.arguments.len() == 6
+            {
+                let DexValue::Int(ic) = invocation.arguments[1] else {
+                    return None;
+                };
+                let DexValue::Int(to) = invocation.arguments[2] else {
+                    return None;
+                };
+                let DexValue::Int(oo) = invocation.arguments[4] else {
+                    return None;
+                };
+                let DexValue::Int(ln) = invocation.arguments[5] else {
+                    return None;
+                };
+                (ic != 0, to, &invocation.arguments[3], oo, ln)
+            } else if invocation.arguments.len() == 5 {
+                let DexValue::Int(to) = invocation.arguments[1] else {
+                    return None;
+                };
+                let DexValue::Int(oo) = invocation.arguments[3] else {
+                    return None;
+                };
+                let DexValue::Int(ln) = invocation.arguments[4] else {
+                    return None;
+                };
+                (false, to, &invocation.arguments[2], oo, ln)
+            } else {
+                return None;
+            };
+            let this_text = self.string_text(&invocation.arguments[0])?;
+            let other_text = self.string_text(other_arg)?;
+            if toffset < 0 || ooffset < 0 || len < 0 {
+                return Some(DexExecutionResult::Int(0));
+            }
+            let this_units: Vec<u16> = this_text.encode_utf16().collect();
+            let other_units: Vec<u16> = other_text.encode_utf16().collect();
+            let (to, oo, ln) = (toffset as usize, ooffset as usize, len as usize);
+            if to.saturating_add(ln) > this_units.len() || oo.saturating_add(ln) > other_units.len()
+            {
+                return Some(DexExecutionResult::Int(0));
+            }
+            let matched = if ignore_case {
+                this_units[to..to + ln]
+                    .iter()
+                    .zip(&other_units[oo..oo + ln])
+                    .all(|(&a, &b)| {
+                        let ca = char::from_u32(u32::from(a));
+                        let cb = char::from_u32(u32::from(b));
+                        match (ca, cb) {
+                            (Some(ca), Some(cb)) => {
+                                ca.to_ascii_lowercase() == cb.to_ascii_lowercase()
+                            }
+                            _ => a == b,
+                        }
+                    })
+            } else {
+                this_units[to..to + ln] == other_units[oo..oo + ln]
+            };
+            return Some(DexExecutionResult::Int(i32::from(matched)));
+        }
+
         if method.matches_builtin_signature(
             "Ljava/text/BreakIterator;",
             "getLineInstance",

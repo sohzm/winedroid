@@ -1757,10 +1757,16 @@ pub(in crate::dex_run) fn view_padding_field(name: &str) -> DexFieldId {
     }
 }
 
+// cite: frameworks-base View.java#getPaddingLeft, getPaddingTop, getPaddingRight, getPaddingBottom, getPaddingStart, getPaddingEnd
 pub(in crate::dex_run) fn is_view_padding_getter(name: &str) -> bool {
     matches!(
         name,
-        "getPaddingLeft" | "getPaddingTop" | "getPaddingRight" | "getPaddingBottom"
+        "getPaddingLeft"
+            | "getPaddingTop"
+            | "getPaddingRight"
+            | "getPaddingBottom"
+            | "getPaddingStart"
+            | "getPaddingEnd"
     )
 }
 

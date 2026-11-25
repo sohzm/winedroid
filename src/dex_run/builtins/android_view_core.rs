@@ -1243,6 +1243,372 @@ impl DexProgram {
             return Some(DexExecutionResult::Void);
         }
 
+        // cite: frameworks-base Paint.java#Paint
+        if method.matches_builtin_signature(
+            "Landroid/graphics/Paint;",
+            "<init>",
+            "(Landroid/graphics/Paint;)V",
+        ) {
+            let invocation = invocation?;
+            self.initialize_paint(invocation.arguments.first()?, 0x01)?;
+
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base Paint.java#setTextAlign, setFakeBoldText, setTextSkewX, setShadowLayer
+        if method.class_descriptor == "Landroid/graphics/Paint;"
+            && matches!(
+                (method.name.as_str(), method.proto.descriptor().as_str()),
+                ("setTextAlign", "(Landroid/graphics/Paint$Align;)V")
+                    | ("setFakeBoldText", "(Z)V")
+                    | ("setTextSkewX", "(F)V")
+                    | ("setShadowLayer", "(FFFI)V")
+            )
+        {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base Typeface.java#create, getStyle
+        if method.class_descriptor == "Landroid/graphics/Typeface;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("create", "(Landroid/graphics/Typeface;I)Landroid/graphics/Typeface;")
+                | ("create", "(Ljava/lang/String;I)Landroid/graphics/Typeface;") => {
+                    let style = match invocation.and_then(|inv| inv.arguments.get(1)) {
+                        Some(DexValue::Int(s)) => *s,
+                        _ => 0,
+                    };
+                    return Some(DexExecutionResult::Value(DexValue::Reference(
+                        std::rc::Rc::from(format!(
+                            "Landroid/graphics/Typeface;:family/sans-serif:style/{style}"
+                        )),
+                    )));
+                }
+                ("getStyle", "()I") => {
+                    let style = invocation
+                        .and_then(|inv| inv.arguments.first())
+                        .and_then(|v| match v {
+                            DexValue::Reference(r) => r
+                                .rsplit_once(":style/")
+                                .and_then(|(_, s)| s.parse::<i32>().ok()),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    return Some(DexExecutionResult::Int(style));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base View.java#inflate
+        if method.matches_builtin_signature(
+            "Landroid/view/View;",
+            "inflate",
+            "(Landroid/content/Context;ILandroid/view/ViewGroup;)Landroid/view/View;",
+        ) {
+            let invocation = invocation?;
+            let DexValue::Int(layout_id) = invocation.arguments.get(1)? else {
+                return None;
+            };
+            let root = invocation.arguments.get(2)?;
+            if !matches!(root, DexValue::Null | DexValue::Uninitialized) {
+                self.register_inflated_layout_tree(*layout_id, root).ok()?;
+                return Some(DexExecutionResult::Value(root.clone()));
+            }
+            let inflated = self.layout_inflater_inflate_without_attach(invocation)?;
+            return Some(DexExecutionResult::Value(inflated));
+        }
+
+        // cite: frameworks-base Region.java#Region
+        if method.class_descriptor == "Landroid/graphics/Region;" && method.name == "<init>" {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base PointF.java#PointF
+        if method.class_descriptor == "Landroid/graphics/PointF;" && method.name == "<init>" {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base Drawable.java#Drawable, invalidateSelf, getState, onStateChange, mutate, setTintList, getIntrinsicWidth, getIntrinsicHeight, setBounds, getBounds, setVisible
+        if method.class_descriptor == "Landroid/graphics/drawable/Drawable;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("<init>", "()V")
+                | ("invalidateSelf", "()V")
+                | ("setTintList", "(Landroid/content/res/ColorStateList;)V")
+                | ("setBounds", "(IIII)V")
+                | ("setBounds", "(Landroid/graphics/Rect;)V") => {
+                    return Some(DexExecutionResult::Void);
+                }
+                ("mutate", "()Landroid/graphics/drawable/Drawable;") => {
+                    let invocation = invocation?;
+                    return Some(DexExecutionResult::Value(
+                        invocation.arguments.first()?.clone(),
+                    ));
+                }
+                ("getState", "()[I") => {
+                    return Some(DexExecutionResult::Value(
+                        self.allocate_filled_array("[I".to_owned(), Vec::new()),
+                    ));
+                }
+                ("getBounds", "()Landroid/graphics/Rect;") => {
+                    return Some(DexExecutionResult::Value(
+                        self.allocate_object("Landroid/graphics/Rect;".to_owned()),
+                    ));
+                }
+                ("getIntrinsicWidth", "()I") | ("getIntrinsicHeight", "()I") => {
+                    return Some(DexExecutionResult::Int(-1));
+                }
+                ("onStateChange", "([I)Z") | ("setVisible", "(ZZ)Z") | ("isStateful", "()Z") => {
+                    return Some(DexExecutionResult::Int(0));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base GradientDrawable.java#GradientDrawable, setColor
+        if method.class_descriptor == "Landroid/graphics/drawable/GradientDrawable;"
+            && (method.name == "<init>"
+                || (method.name == "setColor"
+                    && matches!(
+                        method.proto.descriptor().as_str(),
+                        "(I)V" | "(Landroid/content/res/ColorStateList;)V"
+                    )))
+        {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base PointerIcon.java#getSystemIcon
+        if method.matches_builtin_signature(
+            "Landroid/view/PointerIcon;",
+            "getSystemIcon",
+            "(Landroid/content/Context;I)Landroid/view/PointerIcon;",
+        ) {
+            return Some(DexExecutionResult::Value(
+                self.allocate_object("Landroid/view/PointerIcon;".to_owned()),
+            ));
+        }
+
+        // cite: frameworks-base View.java#setSelected
+        if is_bootstrap_view_constructor_class(&method.class_descriptor)
+            && method.name == "setSelected"
+            && method.proto.descriptor_is("(Z)V")
+        {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base InsetDrawable.java#InsetDrawable
+        if method.class_descriptor == "Landroid/graphics/drawable/InsetDrawable;"
+            && method.name == "<init>"
+        {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base LayerDrawable.java#LayerDrawable, getNumberOfLayers
+        if method.class_descriptor == "Landroid/graphics/drawable/LayerDrawable;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("<init>", "([Landroid/graphics/drawable/Drawable;)V") => {
+                    let invocation = invocation?;
+                    let count = invocation
+                        .arguments
+                        .get(1)
+                        .and_then(|arr| {
+                            self.runtime
+                                .borrow()
+                                .array_entries
+                                .get(&map_identity_key(arr))
+                                .map(Vec::len)
+                        })
+                        .unwrap_or(0) as i32;
+                    self.write_stored_instance_field(
+                        invocation.arguments.first()?,
+                        &DexFieldId {
+                            class_descriptor: "Landroid/graphics/drawable/LayerDrawable;"
+                                .to_owned(),
+                            type_descriptor: "I".to_owned(),
+                            name: "mNumChildren".to_owned(),
+                        },
+                        DexValue::Int(count),
+                    );
+                    return Some(DexExecutionResult::Void);
+                }
+                ("getNumberOfLayers", "()I") => {
+                    let invocation = invocation?;
+                    let count = self
+                        .read_stored_instance_field(
+                            invocation.arguments.first()?,
+                            &DexFieldId {
+                                class_descriptor: "Landroid/graphics/drawable/LayerDrawable;"
+                                    .to_owned(),
+                                type_descriptor: "I".to_owned(),
+                                name: "mNumChildren".to_owned(),
+                            },
+                        )
+                        .and_then(|v| match v {
+                            DexValue::Int(n) => Some(n),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    return Some(DexExecutionResult::Int(count));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base View.java#generateViewId, setPaddingRelative, getFitsSystemWindows, postInvalidateOnAnimation, setHorizontalScrollBarEnabled
+        if method.class_descriptor == "Landroid/view/View;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("generateViewId", "()I") => {
+                    let mut runtime = self.runtime.borrow_mut();
+                    let id = (runtime.next_object_id as i32).max(1) & 0x00ff_ffff;
+                    runtime.next_object_id += 1;
+                    return Some(DexExecutionResult::Int(id.max(1)));
+                }
+                ("setPaddingRelative", "(IIII)V") => {
+                    let invocation = invocation?;
+                    self.write_view_padding(invocation)?;
+                    return Some(DexExecutionResult::Void);
+                }
+                ("getFitsSystemWindows", "()Z")
+                | ("getLayoutDirection", "()I")
+                | ("isSelected", "()Z")
+                | ("getScrollX", "()I") => {
+                    return Some(DexExecutionResult::Int(0));
+                }
+                ("getAccessibilityDelegate", "()Landroid/view/View$AccessibilityDelegate;") => {
+                    return Some(DexExecutionResult::Value(DexValue::Null));
+                }
+                ("postInvalidateOnAnimation", "()V")
+                | ("setHorizontalScrollBarEnabled", "(Z)V")
+                | ("setPointerIcon", "(Landroid/view/PointerIcon;)V")
+                | ("setActivated", "(Z)V")
+                | ("addOnLayoutChangeListener", "(Landroid/view/View$OnLayoutChangeListener;)V")
+                | ("scrollTo", "(II)V") => {
+                    return Some(DexExecutionResult::Void);
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base AccessibilityNodeInfo.java#AccessibilityAction, getId
+        if method.class_descriptor
+            == "Landroid/view/accessibility/AccessibilityNodeInfo$AccessibilityAction;"
+        {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("<init>", "(ILjava/lang/CharSequence;)V") => {
+                    if let Some(invocation) = invocation {
+                        if let (Some(receiver), Some(DexValue::Int(id))) =
+                            (invocation.arguments.first(), invocation.arguments.get(1))
+                        {
+                            self.write_stored_instance_field(
+                                receiver,
+                                &DexFieldId {
+                                    class_descriptor:
+                                        "Landroid/view/accessibility/AccessibilityNodeInfo$AccessibilityAction;"
+                                            .to_owned(),
+                                    type_descriptor: "I".to_owned(),
+                                    name: "mActionId".to_owned(),
+                                },
+                                DexValue::Int(*id),
+                            );
+                        }
+                    }
+                    return Some(DexExecutionResult::Void);
+                }
+                ("getId", "()I") => {
+                    let id = invocation
+                        .and_then(|inv| inv.arguments.first())
+                        .and_then(|receiver| {
+                            self.read_stored_instance_field(
+                                receiver,
+                                &DexFieldId {
+                                    class_descriptor:
+                                        "Landroid/view/accessibility/AccessibilityNodeInfo$AccessibilityAction;"
+                                            .to_owned(),
+                                    type_descriptor: "I".to_owned(),
+                                    name: "mActionId".to_owned(),
+                                },
+                            )
+                        })
+                        .and_then(|v| match v {
+                            DexValue::Int(id) => Some(id),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    return Some(DexExecutionResult::Int(id));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base ViewGroup.java#attachViewToParent
+        if method.matches_builtin_signature(
+            "Landroid/view/ViewGroup;",
+            "attachViewToParent",
+            "(Landroid/view/View;ILandroid/view/ViewGroup$LayoutParams;)V",
+        ) {
+            if let Some(invocation) = invocation {
+                if let (Some(parent), Some(child)) =
+                    (invocation.arguments.first(), invocation.arguments.get(1))
+                {
+                    self.append_view_child(parent, child);
+                }
+            }
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base ProgressBar.java#onAttachedToWindow
+        if method.matches_builtin_signature(
+            "Landroid/widget/ProgressBar;",
+            "onAttachedToWindow",
+            "()V",
+        ) {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base ViewConfiguration.java#getScaledPagingTouchSlop
+        if method.matches_builtin_signature(
+            "Landroid/view/ViewConfiguration;",
+            "getScaledPagingTouchSlop",
+            "()I",
+        ) {
+            return Some(DexExecutionResult::Int(16));
+        }
+
+        // cite: frameworks-base Scroller.java#Scroller
+        if method.class_descriptor == "Landroid/widget/Scroller;" && method.name == "<init>" {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base AnimationUtils.java#loadInterpolator
+        if method.matches_builtin_signature(
+            "Landroid/view/animation/AnimationUtils;",
+            "loadInterpolator",
+            "(Landroid/content/Context;I)Landroid/view/animation/Interpolator;",
+        ) {
+            return Some(DexExecutionResult::Value(self.allocate_object(
+                "Landroid/view/animation/LinearInterpolator;".to_owned(),
+            )));
+        }
+
+        // cite: frameworks-base Drawable.java#ConstantState
+        if method.matches_builtin_signature(
+            "Landroid/graphics/drawable/Drawable$ConstantState;",
+            "<init>",
+            "()V",
+        ) {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base FrameLayout.java#LayoutParams
+        if method.class_descriptor == "Landroid/widget/FrameLayout$LayoutParams;"
+            && method.name == "<init>"
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "(II)V" | "(III)V" | "(Landroid/view/ViewGroup$LayoutParams;)V"
+            )
+        {
+            return Some(DexExecutionResult::Void);
+        }
+
         if method.class_descriptor == "Landroid/graphics/Paint;"
             && method.name == "getTextBounds"
             && matches!(
@@ -2442,9 +2808,9 @@ impl DexProgram {
             && method.proto.descriptor_is("()I")
         {
             let padding_name = match method.name.as_str() {
-                "getPaddingLeft" => "paddingLeft",
+                "getPaddingLeft" | "getPaddingStart" => "paddingLeft",
                 "getPaddingTop" => "paddingTop",
-                "getPaddingRight" => "paddingRight",
+                "getPaddingRight" | "getPaddingEnd" => "paddingRight",
                 "getPaddingBottom" => "paddingBottom",
                 _ => return None,
             };

@@ -372,6 +372,7 @@ pub(super) struct DexRuntimeCaches {
     >,
     pub(super) null_assert_args: crate::fxhash::FxHashMap<u64, Option<usize>>,
     pub(super) method_intrinsics: crate::fxhash::FxHashMap<u64, Option<MethodIntrinsic>>,
+    pub(super) package_registry: Option<crate::package_registry::PackageRegistry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -2358,7 +2358,24 @@ impl DexProgram {
                 parameters: Vec::new(),
             },
         };
-        let Some(resolved) = self.resolve_exact_method(&method)? else {
+        // cite: frameworks-base Instrumentation.java#callApplicationOnCreate
+        let mut resolved = self.resolve_exact_method(&method)?;
+        if resolved.is_none() && method_name != "<init>" {
+            let mut current = self.superclass_descriptor(class_descriptor);
+            while let Some(super_desc) = current {
+                let candidate = DexMethodId {
+                    class_descriptor: super_desc.clone(),
+                    name: method_name.to_owned(),
+                    proto: method.proto.clone(),
+                };
+                if let Some(found) = self.resolve_exact_method(&candidate)? {
+                    resolved = Some(found);
+                    break;
+                }
+                current = self.superclass_descriptor(&super_desc);
+            }
+        }
+        let Some(resolved) = resolved else {
             return Ok(());
         };
         let result = self.execute_method(None, &resolved, Some(arguments), depth)?;
@@ -2499,7 +2516,18 @@ impl DexProgram {
                 );
                 {
                     let _span = trace::span("runtime", "dispatch Handler.post callback");
-                    self.dispatch_runnable(&post.runnable, "Handler.post", depth + 1)?;
+                    // cite: libcore ThreadPoolExecutor.java#execute
+                    let is_worker_executor = post.handler_key.contains("ExecutorService;")
+                        || post.handler_key.contains("ScheduledExecutorService;")
+                        || post.handler_key.contains("ThreadPoolExecutor;");
+                    if is_worker_executor {
+                        self.with_current_guest_thread(
+                            DexValue::Reference(std::rc::Rc::from("Ljava/lang/Thread;:worker")),
+                            || self.dispatch_runnable(&post.runnable, "Handler.post", depth + 1),
+                        )?;
+                    } else {
+                        self.dispatch_runnable(&post.runnable, "Handler.post", depth + 1)?;
+                    }
                 }
                 dispatched += 1;
             }
@@ -3721,6 +3749,15 @@ impl DexProgram {
         &self,
         resolved: &ResolvedMethod,
     ) -> Result<Option<Vec<DexValue>>> {
+        self.prepare_entrypoint_initial_arguments_for_class(&resolved.class_descriptor, resolved)
+    }
+
+    // cite: frameworks-base Instrumentation.java#newActivity
+    fn prepare_entrypoint_initial_arguments_for_class(
+        &self,
+        concrete_class_descriptor: &str,
+        resolved: &ResolvedMethod,
+    ) -> Result<Option<Vec<DexValue>>> {
         if resolved.encoded_method.access_flags & DEX_ACC_STATIC != 0
             || resolved.method.name == "<init>"
             || resolved.encoded_method.code_offset == 0
@@ -3729,28 +3766,28 @@ impl DexProgram {
         }
 
         let code = self.code_item(resolved)?;
-        let receiver = self.allocate_object(resolved.class_descriptor.clone());
+        let receiver = self.allocate_object(concrete_class_descriptor.to_owned());
 
-        self.initialize_entrypoint_receiver(resolved, receiver.clone())?;
+        self.initialize_entrypoint_receiver_for_class(concrete_class_descriptor, receiver.clone())?;
 
         self.entrypoint_initial_arguments_with_receiver(resolved, &code, Some(receiver))
             .map(Some)
             .ok_or_else(|| {
                 WinedroidError::new(format!(
                     "DEX entrypoint argument preparation failed\nclass: {}\nmethod: {}",
-                    resolved.class_descriptor,
+                    concrete_class_descriptor,
                     resolved.method.display_signature()
                 ))
             })
     }
 
-    fn initialize_entrypoint_receiver(
+    fn initialize_entrypoint_receiver_for_class(
         &self,
-        resolved: &ResolvedMethod,
+        class_descriptor: &str,
         receiver: DexValue,
     ) -> Result<()> {
         let constructor_method = DexMethodId {
-            class_descriptor: resolved.class_descriptor.clone(),
+            class_descriptor: class_descriptor.to_owned(),
             name: "<init>".to_owned(),
             proto: crate::dex::DexProto {
                 shorty: "V".to_owned(),
@@ -3769,14 +3806,14 @@ impl DexProgram {
             | DexExecutionResult::Value(_)
             | DexExecutionResult::Throw(_) => Err(WinedroidError::new(format!(
                 "DEX entrypoint constructor did not complete normally\nclass: {}\nmethod: {}",
-                resolved.class_descriptor,
+                class_descriptor,
                 constructor.method.display_signature()
             ))),
             DexExecutionResult::Parked(execution) => {
                 self.discard_parked_execution(&execution);
                 Err(WinedroidError::new(format!(
                     "DEX entrypoint constructor did not complete normally\nclass: {}\nmethod: {}",
-                    resolved.class_descriptor,
+                    class_descriptor,
                     constructor.method.display_signature()
                 )))
             }

@@ -19,7 +19,7 @@ use crate::trace;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledApp {
     pub package_name: String,
-    pub launch_activity: String,
+    pub launch_activity: Option<String>,
     pub app_dir: PathBuf,
     pub source_apk: PathBuf,
     pub package_artifact: PathBuf,
@@ -44,7 +44,17 @@ pub struct InstalledPackageArtifact {
     pub version_name: Option<String>,
     pub version_code: Option<String>,
     pub package_name: String,
-    pub launch_activity: String,
+    pub launch_activity: Option<String>,
+    pub launchable_activities: Vec<String>,
+    pub split_apks: Vec<String>,
+    pub shared_user_id: Option<String>,
+    pub signing_certificates: Vec<String>,
+    pub declared_permissions: Vec<String>,
+    pub services_json: Vec<String>,
+    pub receivers_json: Vec<String>,
+    pub providers_json: Vec<String>,
+    pub uses_libraries_json: Vec<String>,
+    pub application_meta_data_json: Vec<String>,
     pub source_apk: PathBuf,
     pub source_size: u64,
     pub source_modified_unix_millis: u128,
@@ -65,6 +75,15 @@ pub fn install_apk(
     apk_path: &Path,
     report: &InspectionReport,
 ) -> Result<InstalledApp> {
+    install_apk_set(prefix, apk_path, &[], report)
+}
+
+pub fn install_apk_set(
+    prefix: &WinedroidPrefix,
+    apk_path: &Path,
+    split_apk_paths: &[PathBuf],
+    report: &InspectionReport,
+) -> Result<InstalledApp> {
     let package_name = report
         .package_name()
         .ok_or_else(|| WinedroidError::new("manifest does not declare a package name"))?;
@@ -82,22 +101,37 @@ pub fn install_apk(
         let _span = trace::span("install", "copy source APK");
         copy_source_apk(apk_path, &layout.source_apk)?;
     }
+    let installed_splits = {
+        let _span = trace::span("install", "install split APKs");
+        install_split_apks(
+            split_apk_paths,
+            &layout,
+            package_name,
+            report.version_code(),
+        )?
+    };
     {
         let _span = trace::span("install", "extract runtime artifacts");
         install_runtime_artifacts(apk_path, &layout, report)?;
     }
-    let native_libraries = {
+    let mut native_libraries = {
         let _span = trace::span("install", "extract native libraries");
         install_native_libraries(apk_path, &layout, report)?
     };
+    for split_path in split_apk_paths {
+        let split_report = crate::inspect::inspect_apk(split_path)?;
+        let mut split_native = install_native_libraries(split_path, &layout, &split_report)?;
+        native_libraries.append(&mut split_native);
+    }
     {
         let _span = trace::span("install", "write manifest summary");
         write_manifest_summary(&layout.manifest_summary, report)?;
     }
     let artifact = {
         let _span = trace::span("install", "write package artifact");
-        let artifact =
+        let mut artifact =
             InstalledPackageArtifact::from_install(&layout.source_apk, report, &native_libraries)?;
+        artifact.split_apks = installed_splits;
         write_package_artifact(&layout.package_artifact, &artifact)?;
         read_package_artifact(&layout.package_artifact)?
     };
@@ -284,6 +318,20 @@ impl InstalledPackageArtifact {
         let native_plan = report.native_runtime_plan();
         let native_dependency_plan = report.native_dependency_plan(&native_plan);
 
+        let manifest = report.manifest();
+        let launch_activity = report.primary_launch_activity()?;
+        let launchable_activities = report.resolved_launch_activities()?;
+        let signing_certificates = report
+            .signing_certificates()
+            .iter()
+            .map(|der| crate::apk_signature::hex_encode(der))
+            .collect();
+        let declared_permissions = manifest
+            .permissions
+            .iter()
+            .map(|permission| permission.name.clone())
+            .collect();
+
         Ok(Self {
             version_name: report.version_name().map(str::to_owned),
             version_code: report.version_code().map(str::to_owned),
@@ -291,7 +339,37 @@ impl InstalledPackageArtifact {
                 .package_name()
                 .ok_or_else(|| WinedroidError::new("manifest does not declare a package name"))?
                 .to_owned(),
-            launch_activity: report.single_launch_activity()?,
+            launch_activity,
+            launchable_activities,
+            split_apks: Vec::new(),
+            shared_user_id: manifest.shared_user_id.clone(),
+            signing_certificates,
+            declared_permissions,
+            services_json: manifest
+                .services
+                .iter()
+                .map(serialize_service_json)
+                .collect(),
+            receivers_json: manifest
+                .receivers
+                .iter()
+                .map(serialize_receiver_json)
+                .collect(),
+            providers_json: manifest
+                .providers
+                .iter()
+                .map(serialize_provider_json)
+                .collect(),
+            uses_libraries_json: manifest
+                .uses_libraries
+                .iter()
+                .map(serialize_uses_library_json)
+                .collect(),
+            application_meta_data_json: manifest
+                .application_meta_data
+                .iter()
+                .map(serialize_meta_data_json)
+                .collect(),
             source_apk: source_apk.to_path_buf(),
             source_size: metadata.len(),
             source_modified_unix_millis,
@@ -625,6 +703,120 @@ fn copy_source_apk(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+fn install_split_apks(
+    split_apk_paths: &[PathBuf],
+    layout: &AppLayout,
+    base_package_name: &str,
+    base_version_code: Option<&str>,
+) -> Result<Vec<String>> {
+    // cite: frameworks-base PackageParser.java#parsePackageLite
+    if split_apk_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let splits_dir = layout.app_dir.join("splits");
+    create_dir(&splits_dir)?;
+    let mut installed = Vec::with_capacity(split_apk_paths.len());
+    for (index, split_path) in split_apk_paths.iter().enumerate() {
+        let split_report = crate::inspect::inspect_apk(split_path)?;
+        let split_pkg = split_report.package_name().ok_or_else(|| {
+            WinedroidError::new(format!(
+                "split APK `{}` does not declare a package name",
+                split_path.display()
+            ))
+        })?;
+        if split_pkg != base_package_name {
+            return Err(WinedroidError::new(format!(
+                "split APK `{}` package `{split_pkg}` does not match base package `{base_package_name}`",
+                split_path.display()
+            )));
+        }
+        if let (Some(base_vc), Some(split_vc)) = (base_version_code, split_report.version_code()) {
+            if base_vc != split_vc {
+                return Err(WinedroidError::new(format!(
+                    "split APK `{}` versionCode `{split_vc}` does not match base versionCode `{base_vc}`",
+                    split_path.display()
+                )));
+            }
+        }
+        let split_name = split_report
+            .manifest()
+            .split_name
+            .clone()
+            .unwrap_or_else(|| format!("split_{index}"));
+        let dest_name = format!("{split_name}.apk");
+        let dest = splits_dir.join(&dest_name);
+        copy_source_apk(split_path, &dest)?;
+        installed.push(format!("{split_name}\t{}", dest.display()));
+    }
+    Ok(installed)
+}
+
+fn serialize_meta_data_json(meta: &crate::manifest::MetaData) -> String {
+    serde_json::json!({
+        "name": meta.name,
+        "value": meta.value,
+        "resource": meta.resource,
+    })
+    .to_string()
+}
+
+fn serialize_intent_filter_json(filter: &crate::manifest::IntentFilter) -> serde_json::Value {
+    serde_json::json!({
+        "actions": filter.actions,
+        "categories": filter.categories,
+        "schemes": filter.schemes,
+        "authorities": filter.authorities,
+        "mime_types": filter.mime_types,
+    })
+}
+
+fn serialize_service_json(service: &crate::manifest::ServiceComponent) -> String {
+    serde_json::json!({
+        "name": service.name,
+        "exported": service.exported,
+        "enabled": service.enabled,
+        "permission": service.permission,
+        "process": service.process,
+        "intent_filters": service.intent_filters.iter().map(serialize_intent_filter_json).collect::<Vec<_>>(),
+        "meta_data": service.meta_data.iter().map(|m| serde_json::json!({"name": m.name, "value": m.value, "resource": m.resource})).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+fn serialize_receiver_json(receiver: &crate::manifest::ReceiverComponent) -> String {
+    serde_json::json!({
+        "name": receiver.name,
+        "exported": receiver.exported,
+        "enabled": receiver.enabled,
+        "permission": receiver.permission,
+        "intent_filters": receiver.intent_filters.iter().map(serialize_intent_filter_json).collect::<Vec<_>>(),
+        "meta_data": receiver.meta_data.iter().map(|m| serde_json::json!({"name": m.name, "value": m.value, "resource": m.resource})).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+fn serialize_provider_json(provider: &crate::manifest::ProviderComponent) -> String {
+    serde_json::json!({
+        "name": provider.name,
+        "authorities": provider.authorities,
+        "exported": provider.exported,
+        "enabled": provider.enabled,
+        "read_permission": provider.read_permission,
+        "write_permission": provider.write_permission,
+        "grant_uri_permissions": provider.grant_uri_permissions,
+        "meta_data": provider.meta_data.iter().map(|m| serde_json::json!({"name": m.name, "value": m.value, "resource": m.resource})).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+fn serialize_uses_library_json(lib: &crate::manifest::UsesLibrary) -> String {
+    serde_json::json!({
+        "name": lib.name,
+        "required": lib.required,
+    })
+    .to_string()
+}
+
 fn install_runtime_artifacts(
     apk_path: &Path,
     layout: &AppLayout,
@@ -783,7 +975,39 @@ fn write_package_artifact(path: &Path, artifact: &InstalledPackageArtifact) -> R
             &serde_json::Value::String(version.clone()).to_string(),
         )?;
     }
-    push_artifact_line(&mut lines, "launch_activity", &artifact.launch_activity)?;
+    if let Some(launch_activity) = &artifact.launch_activity {
+        push_artifact_line(&mut lines, "launch_activity", launch_activity)?;
+    }
+    for activity in &artifact.launchable_activities {
+        push_artifact_line(&mut lines, "launchable_activity", activity)?;
+    }
+    for split in &artifact.split_apks {
+        push_artifact_line(&mut lines, "split_apk", split)?;
+    }
+    if let Some(shared_user_id) = &artifact.shared_user_id {
+        push_artifact_line(&mut lines, "shared_user_id", shared_user_id)?;
+    }
+    for cert in &artifact.signing_certificates {
+        push_artifact_line(&mut lines, "signing_cert_hex", cert)?;
+    }
+    for perm in &artifact.declared_permissions {
+        push_artifact_line(&mut lines, "declared_permission", perm)?;
+    }
+    for item in &artifact.services_json {
+        push_artifact_line(&mut lines, "service_json", item)?;
+    }
+    for item in &artifact.receivers_json {
+        push_artifact_line(&mut lines, "receiver_json", item)?;
+    }
+    for item in &artifact.providers_json {
+        push_artifact_line(&mut lines, "provider_json", item)?;
+    }
+    for item in &artifact.uses_libraries_json {
+        push_artifact_line(&mut lines, "uses_library_json", item)?;
+    }
+    for item in &artifact.application_meta_data_json {
+        push_artifact_line(&mut lines, "app_meta_data_json", item)?;
+    }
     push_artifact_line(
         &mut lines,
         "source_apk",
@@ -873,7 +1097,17 @@ fn read_package_artifact(path: &Path) -> Result<InstalledPackageArtifact> {
         version_name: optional_artifact_json_string(path, &entries, "app_version_name_json")?,
         version_code: optional_artifact_json_string(path, &entries, "app_version_code_json")?,
         package_name: required_artifact_field(path, &entries, "package")?,
-        launch_activity: required_artifact_field(path, &entries, "launch_activity")?,
+        launch_activity: optional_artifact_field(path, &entries, "launch_activity")?,
+        launchable_activities: artifact_fields(&entries, "launchable_activity"),
+        split_apks: artifact_fields(&entries, "split_apk"),
+        shared_user_id: optional_artifact_field(path, &entries, "shared_user_id")?,
+        signing_certificates: artifact_fields(&entries, "signing_cert_hex"),
+        declared_permissions: artifact_fields(&entries, "declared_permission"),
+        services_json: artifact_fields(&entries, "service_json"),
+        receivers_json: artifact_fields(&entries, "receiver_json"),
+        providers_json: artifact_fields(&entries, "provider_json"),
+        uses_libraries_json: artifact_fields(&entries, "uses_library_json"),
+        application_meta_data_json: artifact_fields(&entries, "app_meta_data_json"),
         source_apk: PathBuf::from(required_artifact_field(path, &entries, "source_apk")?),
         source_size: parse_artifact_u64(
             path,
@@ -1322,7 +1556,17 @@ mod tests {
             version_name: Some("1.2\nbeta".to_owned()),
             version_code: Some("12".to_owned()),
             package_name: "com.example".to_owned(),
-            launch_activity: "com.example.MainActivity".to_owned(),
+            launch_activity: Some("com.example.MainActivity".to_owned()),
+            launchable_activities: vec!["com.example.MainActivity".to_owned()],
+            split_apks: Vec::new(),
+            shared_user_id: None,
+            signing_certificates: Vec::new(),
+            declared_permissions: Vec::new(),
+            services_json: Vec::new(),
+            receivers_json: Vec::new(),
+            providers_json: Vec::new(),
+            uses_libraries_json: Vec::new(),
+            application_meta_data_json: Vec::new(),
             source_apk: PathBuf::from("/tmp/example.apk"),
             source_size: 123,
             source_modified_unix_millis: 456,

@@ -20,6 +20,44 @@ impl DexProgram {
             return Some(DexExecutionResult::Value(DexValue::Null));
         }
 
+        // cite: frameworks-base Context.java#CONNECTIVITY_SERVICE
+        if method.class_descriptor == "Landroid/net/ConnectivityManager;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                (
+                    "registerDefaultNetworkCallback",
+                    "(Landroid/net/ConnectivityManager$NetworkCallback;)V"
+                    | "(Landroid/net/ConnectivityManager$NetworkCallback;Landroid/os/Handler;)V",
+                )
+                | (
+                    "registerNetworkCallback",
+                    "(Landroid/net/NetworkRequest;Landroid/net/ConnectivityManager$NetworkCallback;)V"
+                    | "(Landroid/net/NetworkRequest;Landroid/net/ConnectivityManager$NetworkCallback;Landroid/os/Handler;)V",
+                )
+                | (
+                    "unregisterNetworkCallback",
+                    "(Landroid/net/ConnectivityManager$NetworkCallback;)V",
+                ) => {
+                    return Some(DexExecutionResult::Void);
+                }
+                (
+                    "getNetworkCapabilities",
+                    "(Landroid/net/Network;)Landroid/net/NetworkCapabilities;",
+                ) => {
+                    return Some(DexExecutionResult::Value(DexValue::Null));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base Context.java#CONNECTIVITY_SERVICE
+        if method.matches_builtin_signature(
+            "Landroid/net/ConnectivityManager$NetworkCallback;",
+            "<init>",
+            "()V",
+        ) {
+            return Some(DexExecutionResult::Void);
+        }
+
         None
     }
 }

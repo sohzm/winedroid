@@ -41,6 +41,51 @@ impl DexProgram {
             }
         }
 
+        // cite: libcore TimeZone.java#getTimeZone, getDefault, getID, setID, getRawOffset, getOffset, clone
+        if method.class_descriptor == "Ljava/util/TimeZone;" {
+            match (method.name.as_str(), descriptor.as_str()) {
+                ("getTimeZone", "(Ljava/lang/String;)Ljava/util/TimeZone;") => {
+                    let invocation = invocation?;
+                    let Some(id) = self.string_text(invocation.arguments.first()?) else {
+                        return Some(DexExecutionResult::Throw(
+                            self.null_pointer_exception("id == null"),
+                        ));
+                    };
+                    let tz = self.new_time_zone(&id);
+                    return Some(DexExecutionResult::Value(tz));
+                }
+                ("getDefault", "()Ljava/util/TimeZone;") => {
+                    return Some(DexExecutionResult::Value(self.new_time_zone("UTC")));
+                }
+                ("getID", "()Ljava/lang/String;") => {
+                    let invocation = invocation?;
+                    let id = self
+                        .read_time_zone_id(invocation.arguments.first()?)
+                        .unwrap_or_else(|| "UTC".to_owned());
+                    return Some(DexExecutionResult::Value(DexValue::String(
+                        std::rc::Rc::from(id),
+                    )));
+                }
+                ("setID", "(Ljava/lang/String;)V") => {
+                    let invocation = invocation?;
+                    let id = self.string_text(invocation.arguments.get(1)?)?;
+                    self.write_time_zone_id(invocation.arguments.first()?, id)?;
+                    return Some(DexExecutionResult::Void);
+                }
+                ("getRawOffset", "()I") | ("getOffset", "(J)I") => {
+                    return Some(DexExecutionResult::Int(0));
+                }
+                ("clone", "()Ljava/lang/Object;") => {
+                    let invocation = invocation?;
+                    let id = self
+                        .read_time_zone_id(invocation.arguments.first()?)
+                        .unwrap_or_else(|| "UTC".to_owned());
+                    return Some(DexExecutionResult::Value(self.new_time_zone(&id)));
+                }
+                _ => {}
+            }
+        }
+
         let is_date_format = matches!(
             method.class_descriptor.as_str(),
             "Ljava/text/DateFormat;" | "Ljava/text/SimpleDateFormat;"
@@ -193,6 +238,50 @@ impl DexProgram {
             DexValue::String(std::rc::Rc::from(message.to_owned())),
         );
         exception
+    }
+
+    fn null_pointer_exception(&self, message: &str) -> DexValue {
+        let exception = self.allocate_object("Ljava/lang/NullPointerException;".to_owned());
+        self.write_stored_instance_field(
+            &exception,
+            &throwable_detail_message_field(),
+            DexValue::String(std::rc::Rc::from(message.to_owned())),
+        );
+        exception
+    }
+
+    fn new_time_zone(&self, id: &str) -> DexValue {
+        let tz = self.allocate_object("Ljava/util/SimpleTimeZone;".to_owned());
+        self.write_stored_instance_field(
+            &tz,
+            &time_zone_id_field(),
+            DexValue::String(std::rc::Rc::from(id.to_owned())),
+        );
+        tz
+    }
+
+    fn write_time_zone_id(&self, tz: &DexValue, id: String) -> Option<()> {
+        self.write_stored_instance_field(
+            tz,
+            &time_zone_id_field(),
+            DexValue::String(std::rc::Rc::from(id)),
+        )
+        .then_some(())
+    }
+
+    fn read_time_zone_id(&self, tz: &DexValue) -> Option<String> {
+        match self.read_stored_instance_field(tz, &time_zone_id_field())? {
+            DexValue::String(id) => Some(id.to_string()),
+            _ => None,
+        }
+    }
+}
+
+fn time_zone_id_field() -> DexFieldId {
+    DexFieldId {
+        class_descriptor: "Ljava/util/TimeZone;".to_owned(),
+        type_descriptor: "Ljava/lang/String;".to_owned(),
+        name: "ID".to_owned(),
     }
 }
 

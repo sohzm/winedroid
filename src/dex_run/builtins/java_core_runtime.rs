@@ -13,14 +13,58 @@ impl DexProgram {
             return Some(DexExecutionResult::Value(value));
         }
 
+        // cite: libcore String.java#hashCode
         if method.class_descriptor == "Ljava/lang/Object;"
             && method.name == "hashCode"
             && method.proto.descriptor_is("()I")
         {
             let invocation = invocation?;
-            let value = object_hash_code(invocation)?;
+            let value = self
+                .string_hash_code(invocation)
+                .or_else(|| object_hash_code(invocation))?;
 
             return Some(DexExecutionResult::Int(value));
+        }
+
+        // cite: libcore AccessController.java#doPrivileged
+        if method.class_descriptor == "Ljava/security/AccessController;"
+            && method.name == "doPrivileged"
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "(Ljava/security/PrivilegedAction;)Ljava/lang/Object;"
+                    | "(Ljava/security/PrivilegedExceptionAction;)Ljava/lang/Object;"
+            )
+        {
+            let invocation = invocation?;
+            let action = invocation.arguments.first()?.clone();
+            let class_descriptor = value_class_descriptor(&action)?.to_owned();
+            let run_method = DexMethodId {
+                class_descriptor,
+                name: "run".to_owned(),
+                proto: crate::dex::DexProto {
+                    shorty: "L".to_owned(),
+                    return_type: "Ljava/lang/Object;".to_owned(),
+                    parameters: Vec::new(),
+                },
+            };
+            if let Ok(Some(resolved)) = self.resolve_exact_method(&run_method) {
+                if let Ok(result) =
+                    self.execute_method(None, &resolved, Some(std::slice::from_ref(&action)), 1)
+                {
+                    return Some(result);
+                }
+            }
+            return None;
+        }
+
+        // cite: libcore ByteOrder.java#nativeOrder
+        if method.class_descriptor == "Ljava/nio/ByteOrder;"
+            && method.name == "nativeOrder"
+            && method.proto.descriptor_is("()Ljava/nio/ByteOrder;")
+        {
+            return Some(DexExecutionResult::Value(DexValue::Reference(
+                std::rc::Rc::from("Ljava/nio/ByteOrder;:LITTLE_ENDIAN"),
+            )));
         }
 
         if method.name == "clone"
@@ -140,6 +184,19 @@ impl DexProgram {
             && method.proto.descriptor_is("(Ljava/lang/Object;)Z")
         {
             let invocation = invocation?;
+            if let Some(left) = invocation
+                .arguments
+                .first()
+                .and_then(|v| self.string_text(v))
+            {
+                // cite: libcore String.java#equals
+                let matched = invocation
+                    .arguments
+                    .get(1)
+                    .and_then(|v| self.string_text(v))
+                    .is_some_and(|right| left == right);
+                return Some(DexExecutionResult::Int(i32::from(matched)));
+            }
             let value = object_equals(invocation)?;
 
             return Some(DexExecutionResult::Int(value));
@@ -195,6 +252,19 @@ impl DexProgram {
             let value = objects_require_non_null(invocation)?;
 
             return Some(DexExecutionResult::Value(value));
+        }
+
+        // cite: libcore Objects.java#equals
+        if method.matches_builtin_signature(
+            "Ljava/util/Objects;",
+            "equals",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+        ) {
+            let invocation = invocation?;
+            let left = invocation.arguments.first()?;
+            let right = invocation.arguments.get(1)?;
+            let equal = self.runtime_values_equal(left, right, 0, true).ok()?;
+            return Some(DexExecutionResult::Int(i32::from(equal)));
         }
 
         if method.class_descriptor == "Ljava/lang/System;"
@@ -1803,6 +1873,26 @@ impl DexProgram {
             thread_get_id(invocation)?;
 
             return Some(DexExecutionResult::Value(DexValue::Long(1)));
+        }
+
+        // cite: libcore Thread.java#getStackTrace
+        if method.class_descriptor == "Ljava/lang/Thread;"
+            && method.name == "getStackTrace"
+            && method
+                .proto
+                .descriptor_is("()[Ljava/lang/StackTraceElement;")
+        {
+            let array =
+                self.allocate_filled_array("[Ljava/lang/StackTraceElement;".to_owned(), Vec::new());
+            return Some(DexExecutionResult::Value(array));
+        }
+
+        // cite: libcore Thread.java#sleep
+        if method.class_descriptor == "Ljava/lang/Thread;"
+            && method.name == "sleep"
+            && matches!(method.proto.descriptor().as_str(), "(J)V" | "(JI)V")
+        {
+            return Some(DexExecutionResult::Void);
         }
 
         if method.class_descriptor == "Landroid/os/Handler;"

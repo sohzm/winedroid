@@ -57,6 +57,10 @@ pub(crate) fn launch_apk_with_display_size(
 }
 
 pub fn install(apk_path: &Path) -> Result<()> {
+    install_set(apk_path, &[])
+}
+
+pub fn install_set(apk_path: &Path, split_apk_paths: &[std::path::PathBuf]) -> Result<()> {
     let _span = trace::span("install", "install APK");
     let report = {
         let _span = trace::span("inspect", "inspect APK");
@@ -66,7 +70,7 @@ pub fn install(apk_path: &Path) -> Result<()> {
         let _span = trace::span("launch", "resolve prefix");
         WinedroidPrefix::default()?
     };
-    let installed_app = install::install_apk(&prefix, apk_path, &report)?;
+    let installed_app = install::install_apk_set(&prefix, apk_path, split_apk_paths, &report)?;
     let config = WinedroidConfig::load_or_create(&prefix)?;
     let native_plan = report.native_runtime_plan();
     let native_dependency_plan = report.native_dependency_plan(&native_plan);
@@ -74,7 +78,10 @@ pub fn install(apk_path: &Path) -> Result<()> {
     print_launch_summary(
         &prefix,
         &installed_app,
-        &installed_app.launch_activity,
+        installed_app
+            .launch_activity
+            .as_deref()
+            .unwrap_or("none (headless/multi-launcher)"),
         &native_plan,
         &native_dependency_plan,
         &config,
@@ -84,6 +91,13 @@ pub fn install(apk_path: &Path) -> Result<()> {
 }
 
 pub fn launch_installed(package_name: &str) -> Result<()> {
+    launch_installed_activity(package_name, None)
+}
+
+pub fn launch_installed_activity(
+    package_name: &str,
+    activity_override: Option<&str>,
+) -> Result<()> {
     let _span = trace::span("launch", "launch installed package");
     let prefix = {
         let _span = trace::span("launch", "resolve prefix");
@@ -105,7 +119,7 @@ pub fn launch_installed(package_name: &str) -> Result<()> {
     run_installed(
         &prefix,
         installed_app,
-        LaunchMetadata::from_artifact(&artifact),
+        LaunchMetadata::from_artifact(&artifact, activity_override)?,
         config,
     )
 }
@@ -136,17 +150,39 @@ impl LaunchMetadata {
         })
     }
 
-    fn from_artifact(artifact: &InstalledPackageArtifact) -> Self {
+    fn from_artifact(
+        artifact: &InstalledPackageArtifact,
+        activity_override: Option<&str>,
+    ) -> Result<Self> {
         let native_plan = artifact.native_runtime_plan();
         let native_dependency_plan = artifact.native_dependency_plan(&native_plan);
+        let launch_activity = match activity_override {
+            Some(activity) => activity.to_owned(),
+            None => match artifact.launch_activity.clone() {
+                Some(activity) => activity,
+                None if artifact.launchable_activities.is_empty() => {
+                    return Err(WinedroidError::new(format!(
+                        "package `{}` has no launchable activity",
+                        artifact.package_name
+                    )));
+                }
+                None => {
+                    return Err(WinedroidError::new(format!(
+                        "package `{}` declares multiple launchable activities; pass --activity <name>: {}",
+                        artifact.package_name,
+                        artifact.launchable_activities.join(", ")
+                    )));
+                }
+            },
+        };
 
-        Self {
+        Ok(Self {
             version_name: artifact.version_name.clone(),
             version_code: artifact.version_code.clone(),
-            launch_activity: artifact.launch_activity.clone(),
+            launch_activity,
             native_plan,
             native_dependency_plan,
-        }
+        })
     }
 }
 
@@ -156,13 +192,7 @@ fn run_installed(
     metadata: LaunchMetadata,
     config: WinedroidConfig,
 ) -> Result<()> {
-    if installed_app.launch_activity != metadata.launch_activity {
-        return Err(WinedroidError::new(format!(
-            "installed package launch activity metadata does not match app layout\nmetadata: {launch_activity}\nlayout: {}",
-            installed_app.launch_activity,
-            launch_activity = metadata.launch_activity
-        )));
-    }
+    let launch_activity = metadata.launch_activity.clone();
 
     print_session_header(
         &installed_app.package_name,
@@ -173,7 +203,7 @@ fn run_installed(
     print_launch_summary(
         prefix,
         &installed_app,
-        &installed_app.launch_activity,
+        &launch_activity,
         &metadata.native_plan,
         &metadata.native_dependency_plan,
         &config,
@@ -187,7 +217,7 @@ fn run_installed(
         let _span = trace::span("runtime", "start activity runtime worker");
         ActivityRuntimeWorker::start(
             &installed_app.source_apk,
-            &installed_app.launch_activity,
+            &launch_activity,
             Some(&installed_app.data_dir),
             Some(&installed_app.device_data_dir),
             Some(&shared_storage_dir),
@@ -196,7 +226,7 @@ fn run_installed(
     };
     let mut window_request = host_window::ActivityWindowRequest::new(
         &installed_app.package_name,
-        &installed_app.launch_activity,
+        &launch_activity,
         display_size,
     )
     .with_frame_interval_nanos(frame_interval_nanos)
@@ -1366,6 +1396,8 @@ mod tests {
             has_launcher_category: true,
             label: None,
             theme: None,
+            intent_filters: Vec::new(),
+            meta_data: Vec::new(),
         }
     }
 

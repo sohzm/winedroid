@@ -48,14 +48,181 @@ impl DexProgram {
             return Some(DexExecutionResult::Value(value));
         }
 
+        // cite: frameworks-base ColorStateList.java#ColorStateList
+        if method.matches_builtin_signature(
+            "Landroid/content/res/ColorStateList;",
+            "<init>",
+            "([[I[I)V",
+        ) {
+            let invocation = invocation?;
+            let receiver = invocation.arguments.first()?;
+            let default_color = invocation
+                .arguments
+                .get(2)
+                .and_then(|colors| {
+                    let key = map_identity_key(colors);
+                    self.runtime
+                        .borrow()
+                        .array_entries
+                        .get(&key)
+                        .and_then(|values| values.first())
+                        .and_then(|value| match value {
+                            DexValue::Int(color) => Some(*color),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(0);
+            self.write_stored_instance_field(
+                receiver,
+                &DexFieldId {
+                    class_descriptor: "Landroid/content/res/ColorStateList;".to_owned(),
+                    type_descriptor: "I".to_owned(),
+                    name: "mDefaultColor".to_owned(),
+                },
+                DexValue::Int(default_color),
+            );
+            return Some(DexExecutionResult::Void);
+        }
+
         if method.class_descriptor == "Landroid/content/res/ColorStateList;"
             && method.name == "getDefaultColor"
             && method.proto.descriptor_is("()I")
         {
             let invocation = invocation?;
-            let value = self.color_state_list_get_default_color(invocation)?;
+            let value = self
+                .color_state_list_get_default_color(invocation)
+                .or_else(|| {
+                    invocation
+                        .arguments
+                        .first()
+                        .and_then(|receiver| {
+                            self.read_stored_instance_field(
+                                receiver,
+                                &DexFieldId {
+                                    class_descriptor: "Landroid/content/res/ColorStateList;"
+                                        .to_owned(),
+                                    type_descriptor: "I".to_owned(),
+                                    name: "mDefaultColor".to_owned(),
+                                },
+                            )
+                        })
+                        .and_then(|v| match v {
+                            DexValue::Int(color) => Some(color),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(0);
 
             return Some(DexExecutionResult::Int(value));
+        }
+
+        // cite: frameworks-base ColorStateList.java#getColorForState
+        if method.matches_builtin_signature(
+            "Landroid/content/res/ColorStateList;",
+            "getColorForState",
+            "([II)I",
+        ) {
+            let invocation = invocation?;
+            let default_fallback = match invocation.arguments.get(2) {
+                Some(DexValue::Int(color)) => *color,
+                _ => 0,
+            };
+            let color = self
+                .color_state_list_get_default_color(&DexInvocation {
+                    kind: invocation.kind,
+                    range: false,
+                    method_index: invocation.method_index,
+                    argument_registers: invocation
+                        .argument_registers
+                        .first()
+                        .copied()
+                        .into_iter()
+                        .collect(),
+                    arguments: vec![invocation.arguments.first()?.clone()].into(),
+                })
+                .or_else(|| {
+                    invocation
+                        .arguments
+                        .first()
+                        .and_then(|receiver| {
+                            self.read_stored_instance_field(
+                                receiver,
+                                &DexFieldId {
+                                    class_descriptor: "Landroid/content/res/ColorStateList;"
+                                        .to_owned(),
+                                    type_descriptor: "I".to_owned(),
+                                    name: "mDefaultColor".to_owned(),
+                                },
+                            )
+                        })
+                        .and_then(|v| match v {
+                            DexValue::Int(color) => Some(color),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(default_fallback);
+            return Some(DexExecutionResult::Int(color));
+        }
+
+        // cite: frameworks-base Resources.java#hashCode
+        if method.matches_builtin_signature(
+            "Landroid/content/res/Resources$Theme;",
+            "hashCode",
+            "()I",
+        ) {
+            let invocation = invocation?;
+            let value = object_hash_code(invocation).unwrap_or(1);
+            return Some(DexExecutionResult::Int(value));
+        }
+
+        // cite: frameworks-base Resources.java#getInteger
+        if method.matches_builtin_signature("Landroid/content/res/Resources;", "getInteger", "(I)I")
+        {
+            return Some(DexExecutionResult::Int(0));
+        }
+
+        // cite: frameworks-base Resources.java#getColorStateList
+        if method.class_descriptor == "Landroid/content/res/Resources;"
+            && method.name == "getColorStateList"
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "(I)Landroid/content/res/ColorStateList;"
+                    | "(ILandroid/content/res/Resources$Theme;)Landroid/content/res/ColorStateList;"
+            )
+        {
+            let csl = self.allocate_object("Landroid/content/res/ColorStateList;".to_owned());
+            return Some(DexExecutionResult::Value(csl));
+        }
+
+        // cite: frameworks-base TypedArray.java#getInteger
+        if method.matches_builtin_signature(
+            "Landroid/content/res/TypedArray;",
+            "getInteger",
+            "(II)I",
+        ) {
+            let invocation = invocation?;
+            let value = self.typed_array_get_int(invocation)?;
+            return Some(DexExecutionResult::Int(value));
+        }
+
+        // cite: frameworks-base TypedArray.java#peekValue
+        if method.matches_builtin_signature(
+            "Landroid/content/res/TypedArray;",
+            "peekValue",
+            "(I)Landroid/util/TypedValue;",
+        ) {
+            return Some(DexExecutionResult::Value(DexValue::Null));
+        }
+
+        // cite: frameworks-base Configuration.java#equals
+        if method.matches_builtin_signature(
+            "Landroid/content/res/Configuration;",
+            "equals",
+            "(Landroid/content/res/Configuration;)Z",
+        ) {
+            let invocation = invocation?;
+            let equal = invocation.arguments.first() == invocation.arguments.get(1);
+            return Some(DexExecutionResult::Int(i32::from(equal)));
         }
 
         if method.class_descriptor == "Landroid/content/Context;"
@@ -373,6 +540,29 @@ impl DexProgram {
             return Some(DexExecutionResult::Void);
         }
 
+        // cite: frameworks-base ContextWrapper.java#ContextWrapper
+        if method.class_descriptor == "Landroid/content/ContextWrapper;"
+            && method.name == "<init>"
+            && method.proto.descriptor_is("(Landroid/content/Context;)V")
+        {
+            if let Some(invocation) = invocation {
+                if let (Some(receiver), Some(base)) =
+                    (invocation.arguments.first(), invocation.arguments.get(1))
+                {
+                    self.write_stored_instance_field(
+                        receiver,
+                        &DexFieldId {
+                            class_descriptor: "Landroid/content/ContextWrapper;".to_owned(),
+                            type_descriptor: "Landroid/content/Context;".to_owned(),
+                            name: "mBase".to_owned(),
+                        },
+                        base.clone(),
+                    );
+                }
+            }
+            return Some(DexExecutionResult::Void);
+        }
+
         if method.class_descriptor == "Landroid/content/ContextWrapper;"
             && method.name == "getBaseContext"
             && method.proto.descriptor_is("()Landroid/content/Context;")
@@ -600,6 +790,27 @@ impl DexProgram {
 
             return Some(DexExecutionResult::Value(DexValue::String(
                 std::rc::Rc::from(value),
+            )));
+        }
+
+        // cite: frameworks-base Resources.java#getResourcePackageName
+        if method.class_descriptor == "Landroid/content/res/Resources;"
+            && method.name == "getResourcePackageName"
+            && method.proto.descriptor_is("(I)Ljava/lang/String;")
+        {
+            let invocation = invocation?;
+            let DexValue::Int(res_id) = invocation.arguments.get(1)? else {
+                return None;
+            };
+            let package = if ((*res_id as u32) >> 24) == 0x01 {
+                "android".to_owned()
+            } else {
+                self.package_name
+                    .clone()
+                    .unwrap_or_else(|| "android".to_owned())
+            };
+            return Some(DexExecutionResult::Value(DexValue::String(
+                std::rc::Rc::from(package),
             )));
         }
 
@@ -1053,6 +1264,36 @@ impl DexProgram {
             return Some(DexExecutionResult::Value(value));
         }
 
+        // cite: frameworks-base XmlBlock.java#getLineNumber, getColumnNumber, getPositionDescription
+        if matches!(
+            method.class_descriptor.as_str(),
+            "Lorg/xmlpull/v1/XmlPullParser;" | "Landroid/content/res/XmlResourceParser;"
+        ) {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("getLineNumber", "()I") | ("getColumnNumber", "()I") => {
+                    return Some(DexExecutionResult::Int(1));
+                }
+                ("getPositionDescription", "()Ljava/lang/String;") => {
+                    return Some(DexExecutionResult::Value(DexValue::String(
+                        std::rc::Rc::from("Binary XML file line #1"),
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base Resources.java#obtainAttributes
+        if method.class_descriptor == "Landroid/content/res/Resources;"
+            && method.name == "obtainAttributes"
+            && method.proto.descriptor()
+                == "(Landroid/util/AttributeSet;[I)Landroid/content/res/TypedArray;"
+        {
+            let invocation = invocation?;
+            let value = context_obtain_attribute_set_styled_attributes(invocation)?;
+
+            return Some(DexExecutionResult::Value(value));
+        }
+
         if method.class_descriptor == "Landroid/content/res/XmlResourceParser;"
             && method.name == "close"
             && method.proto.descriptor_is("()V")
@@ -1241,6 +1482,26 @@ impl DexProgram {
             let value = context_obtain_attribute_set_styled_attributes(invocation)?;
 
             return Some(DexExecutionResult::Value(value));
+        }
+
+        // cite: frameworks-base Context.java#obtainStyledAttributes
+        if method.class_descriptor == "Landroid/content/Context;"
+            && method.name == "obtainStyledAttributes"
+            && method
+                .proto
+                .descriptor_is("(I[I)Landroid/content/res/TypedArray;")
+        {
+            let invocation = invocation?;
+            let res_id = match invocation.arguments.get(1) {
+                Some(DexValue::Int(id)) => *id,
+                _ => 0,
+            };
+            let attrs_key = map_identity_key(invocation.arguments.get(2)?);
+            return Some(DexExecutionResult::Value(DexValue::Reference(
+                std::rc::Rc::from(format!(
+                    "Landroid/content/res/TypedArray;:style:{res_id}:{attrs_key}"
+                )),
+            )));
         }
 
         if method.class_descriptor == "Landroid/content/Context;"

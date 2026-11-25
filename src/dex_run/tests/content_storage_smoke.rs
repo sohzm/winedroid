@@ -1321,7 +1321,6 @@ fn builtin_sqlite_program_bind_string_accepts_sqlite_query_receiver() {
 
 #[test]
 fn cts_sqlite_database_test_transaction_commits_and_rolls_back() {
-    // cite: cts SQLiteDatabaseTest.java#testTransaction
     let program = SqliteTestFixture::new("transaction_commit_rollback");
     let methods = SqliteTransactionMethods::new();
     let database = sqlite_transaction_database(&program);
@@ -1379,7 +1378,6 @@ fn aosp_sqlite_database_transaction_modes_control_reader_access() {
 
 #[test]
 fn cts_sqlite_database_test_transaction_propagates_nested_failure() {
-    // cite: cts SQLiteDatabaseTest.java#testTransaction
     let program = SqliteTestFixture::new("transaction_nested");
     let methods = SqliteTransactionMethods::new();
     let database = sqlite_transaction_database(&program);
@@ -1414,7 +1412,6 @@ fn cts_sqlite_database_test_transaction_propagates_nested_failure() {
 
 #[test]
 fn cts_sqlite_database_test_transaction_rejects_invalid_state() {
-    // cite: cts SQLiteDatabaseTest.java#testTransaction
     let program = SqliteTestFixture::new("transaction_invalid_state");
     let methods = SqliteTransactionMethods::new();
     let database = sqlite_transaction_database(&program);

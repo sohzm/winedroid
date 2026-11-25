@@ -535,8 +535,38 @@ impl DexProgram {
                     };
                     let descriptor = layout_element_class_descriptor(&element.name)
                         .unwrap_or_else(|| "Landroid/view/View;".to_owned());
+                    let parent = stack
+                        .last()
+                        .map(|(view, _)| view.clone())
+                        .or_else(|| attach_parent.cloned())
+                        .filter(|parent| !matches!(parent, DexValue::Null));
+
+                    let mut factory_created = false;
                     let view = if let (true, Some(file_root)) = (is_first, file_root) {
                         file_root.clone()
+                    } else if let Some(initialization_depth) = initialization_depth {
+                        if matches!(
+                            element.name.as_str(),
+                            "androidx.fragment.app.FragmentContainerView" | "fragment"
+                        ) {
+                            if let Some(created) = self.try_create_view_via_factory2(
+                                parent.as_ref(),
+                                &element.name,
+                                attrs,
+                                initialization_depth,
+                            )? {
+                                factory_created = true;
+                                created
+                            } else if let Some(view_id) = view_id {
+                                layout_child_reference(layout_id, view_id, &descriptor)
+                            } else {
+                                layout_node_reference(layout_id, ordinal, &descriptor)
+                            }
+                        } else if let Some(view_id) = view_id {
+                            layout_child_reference(layout_id, view_id, &descriptor)
+                        } else {
+                            layout_node_reference(layout_id, ordinal, &descriptor)
+                        }
                     } else if let Some(view_id) = view_id {
                         layout_child_reference(layout_id, view_id, &descriptor)
                     } else {
@@ -555,15 +585,16 @@ impl DexProgram {
                             .inflated_view_children
                             .insert((flat_root_key.to_owned(), view_id), view.clone());
                     }
-                    if let Some(initialization_depth) = initialization_depth {
-                        // cite: frameworks-base LayoutInflater.java#createViewFromTag, createView, mConstructorSignature
-                        self.initialize_inflated_layout_root(&view, attrs, initialization_depth)?;
+                    if !factory_created {
+                        if let Some(initialization_depth) = initialization_depth {
+                            // cite: frameworks-base LayoutInflater.java#createViewFromTag, createView, mConstructorSignature
+                            self.initialize_inflated_layout_root(
+                                &view,
+                                attrs,
+                                initialization_depth,
+                            )?;
+                        }
                     }
-                    let parent = stack
-                        .last()
-                        .map(|(view, _)| view.clone())
-                        .or_else(|| attach_parent.cloned())
-                        .filter(|parent| !matches!(parent, DexValue::Null));
                     if let Some(parent) = parent {
                         if map_identity_key(&parent) != map_identity_key(&view) {
                             self.append_view_child(&parent, &view);
@@ -625,6 +656,91 @@ impl DexProgram {
                     "View.onFinishInflate did not complete normally\nclass: {class_descriptor}"
                 )))
             }
+        }
+    }
+
+    // cite: frameworks-base LayoutInflater.java#tryCreateView
+    // cite: frameworks-base PhoneWindow.java#PhoneWindow
+    fn try_create_view_via_factory2(
+        &self,
+        parent: Option<&DexValue>,
+        tag_name: &str,
+        attrs: &DexValue,
+        depth: usize,
+    ) -> Result<Option<DexValue>> {
+        let context = self.active_context_value();
+        let Some(context_descriptor) = value_class_descriptor(&context).map(str::to_owned) else {
+            return Ok(None);
+        };
+        let on_create_view = DexMethodId {
+            class_descriptor: context_descriptor.clone(),
+            name: "onCreateView".to_owned(),
+            proto: crate::dex::DexProto {
+                shorty: "LLLLL".to_owned(),
+                return_type: "Landroid/view/View;".to_owned(),
+                parameters: vec![
+                    "Landroid/view/View;".to_owned(),
+                    "Ljava/lang/String;".to_owned(),
+                    "Landroid/content/Context;".to_owned(),
+                    "Landroid/util/AttributeSet;".to_owned(),
+                ],
+            },
+        };
+        let Some(resolved) =
+            self.resolve_exact_method_in_class_hierarchy(&context_descriptor, &on_create_view)?
+        else {
+            return Ok(None);
+        };
+        let args = vec![
+            context.clone(),
+            parent.cloned().unwrap_or(DexValue::Null),
+            DexValue::String(std::rc::Rc::from(tag_name.to_owned())),
+            context,
+            attrs.clone(),
+        ];
+        match self.execute_method(None, &resolved, Some(&args), depth + 1)? {
+            DexExecutionResult::Value(view)
+                if !matches!(view, DexValue::Null | DexValue::Uninitialized) =>
+            {
+                Ok(Some(view))
+            }
+            DexExecutionResult::Value(_) | DexExecutionResult::Void => Ok(None),
+            DexExecutionResult::Throw(exception) => {
+                let detail_field = DexFieldId {
+                    class_descriptor: "Ljava/lang/Throwable;".to_owned(),
+                    type_descriptor: "Ljava/lang/String;".to_owned(),
+                    name: "detailMessage".to_owned(),
+                };
+                let cause_field = DexFieldId {
+                    class_descriptor: "Ljava/lang/Throwable;".to_owned(),
+                    type_descriptor: "Ljava/lang/Throwable;".to_owned(),
+                    name: "cause".to_owned(),
+                };
+                let mut lines = vec![format!(
+                    "LayoutInflater Factory2.onCreateView threw an exception\ntag: {tag_name}\nexception: {exception}"
+                )];
+                let mut current = exception;
+                for depth_idx in 0..8 {
+                    if let Some(detail) = self
+                        .read_stored_instance_field(&current, &detail_field)
+                        .and_then(|v| self.string_text(&v))
+                    {
+                        lines.push(format!("message[{depth_idx}]: {detail}"));
+                    }
+                    let Some(next) = self.read_stored_instance_field(&current, &cause_field) else {
+                        break;
+                    };
+                    if matches!(next, DexValue::Null | DexValue::Uninitialized)
+                        || map_identity_key(&next) == map_identity_key(&current)
+                    {
+                        break;
+                    }
+                    lines.push(format!("caused by: {next}"));
+                    current = next;
+                }
+                Err(WinedroidError::new(lines.join("\n")))
+            }
+            DexExecutionResult::Int(_) | DexExecutionResult::Parked(_) => Ok(None),
         }
     }
 

@@ -109,6 +109,143 @@ impl DexProgram {
             )));
         }
 
+        // cite: libcore SocketFactory.java#getDefault
+        if method.matches_builtin_signature(
+            "Ljavax/net/SocketFactory;",
+            "getDefault",
+            "()Ljavax/net/SocketFactory;",
+        ) {
+            return Some(DexExecutionResult::Value(
+                self.allocate_object("Ljavax/net/SocketFactory;".to_owned()),
+            ));
+        }
+
+        // cite: libcore SSLSocketFactory.java#getDefault
+        if method.matches_builtin_signature(
+            "Ljavax/net/ssl/SSLSocketFactory;",
+            "getDefault",
+            "()Ljavax/net/SocketFactory;",
+        ) {
+            return Some(DexExecutionResult::Value(
+                self.allocate_object("Ljavax/net/ssl/SSLSocketFactory;".to_owned()),
+            ));
+        }
+
+        // cite: libcore ProxySelector.java#getDefault
+        if method.matches_builtin_signature(
+            "Ljava/net/ProxySelector;",
+            "getDefault",
+            "()Ljava/net/ProxySelector;",
+        ) {
+            return Some(DexExecutionResult::Value(
+                self.allocate_object("Ljava/net/ProxySelector;".to_owned()),
+            ));
+        }
+
+        // cite: libcore TrustManagerFactory.java#getDefaultAlgorithm, getInstance, init, getTrustManagers
+        if method.class_descriptor == "Ljavax/net/ssl/TrustManagerFactory;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("getDefaultAlgorithm", "()Ljava/lang/String;") => {
+                    return Some(DexExecutionResult::Value(DexValue::String(
+                        std::rc::Rc::from("PKIX"),
+                    )));
+                }
+                ("getInstance", "(Ljava/lang/String;)Ljavax/net/ssl/TrustManagerFactory;") => {
+                    return Some(DexExecutionResult::Value(
+                        self.allocate_object("Ljavax/net/ssl/TrustManagerFactory;".to_owned()),
+                    ));
+                }
+                ("init", "(Ljava/security/KeyStore;)V") => {
+                    return Some(DexExecutionResult::Void);
+                }
+                ("getTrustManagers", "()[Ljavax/net/ssl/TrustManager;") => {
+                    let tm = self.allocate_object("Ljavax/net/ssl/X509TrustManager;".to_owned());
+                    let array = self.allocate_filled_array(
+                        "[Ljavax/net/ssl/TrustManager;".to_owned(),
+                        vec![tm],
+                    );
+                    return Some(DexExecutionResult::Value(array));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: libcore X509TrustManager.java#getAcceptedIssuers
+        if method.matches_builtin_signature(
+            "Ljavax/net/ssl/X509TrustManager;",
+            "getAcceptedIssuers",
+            "()[Ljava/security/cert/X509Certificate;",
+        ) {
+            let array = self.allocate_filled_array(
+                "[Ljava/security/cert/X509Certificate;".to_owned(),
+                Vec::new(),
+            );
+            return Some(DexExecutionResult::Value(array));
+        }
+
+        // cite: libcore SSLContext.java#getInstance, init, getSocketFactory
+        if method.class_descriptor == "Ljavax/net/ssl/SSLContext;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("getInstance", "(Ljava/lang/String;)Ljavax/net/ssl/SSLContext;")
+                | (
+                    "getInstance",
+                    "(Ljava/lang/String;Ljava/lang/String;)Ljavax/net/ssl/SSLContext;",
+                )
+                | (
+                    "getInstance",
+                    "(Ljava/lang/String;Ljava/security/Provider;)Ljavax/net/ssl/SSLContext;",
+                ) => {
+                    return Some(DexExecutionResult::Value(
+                        self.allocate_object("Ljavax/net/ssl/SSLContext;".to_owned()),
+                    ));
+                }
+                (
+                    "init",
+                    "([Ljavax/net/ssl/KeyManager;[Ljavax/net/ssl/TrustManager;Ljava/security/SecureRandom;)V",
+                ) => {
+                    return Some(DexExecutionResult::Void);
+                }
+                ("getSocketFactory", "()Ljavax/net/ssl/SSLSocketFactory;") => {
+                    return Some(DexExecutionResult::Value(
+                        self.allocate_object("Ljavax/net/ssl/SSLSocketFactory;".to_owned()),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: libcore Security.java#getProviders
+        if method.matches_builtin_signature(
+            "Ljava/security/Security;",
+            "getProviders",
+            "()[Ljava/security/Provider;",
+        ) {
+            let provider = self.allocate_object("Ljava/security/Provider;".to_owned());
+            let array =
+                self.allocate_filled_array("[Ljava/security/Provider;".to_owned(), vec![provider]);
+            return Some(DexExecutionResult::Value(array));
+        }
+
+        // cite: libcore Provider.java#getName
+        if method.matches_builtin_signature(
+            "Ljava/security/Provider;",
+            "getName",
+            "()Ljava/lang/String;",
+        ) {
+            return Some(DexExecutionResult::Value(DexValue::String(
+                std::rc::Rc::from("AndroidOpenSSL"),
+            )));
+        }
+
+        // cite: frameworks-base X509TrustManagerExtensions.java#X509TrustManagerExtensions
+        if method.matches_builtin_signature(
+            "Landroid/net/http/X509TrustManagerExtensions;",
+            "<init>",
+            "(Ljavax/net/ssl/X509TrustManager;)V",
+        ) {
+            return Some(DexExecutionResult::Void);
+        }
+
         None
     }
 

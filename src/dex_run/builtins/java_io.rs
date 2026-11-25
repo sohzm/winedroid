@@ -222,7 +222,10 @@ impl DexProgram {
         // cite: libcore FileReader.java#FileReader
         if method.class_descriptor == "Ljava/io/FileReader;"
             && method.name == "<init>"
-            && method.proto.descriptor_is("(Ljava/io/File;)V")
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "(Ljava/io/File;)V" | "(Ljava/lang/String;)V"
+            )
         {
             let invocation = invocation?;
             let result = self.initialize_file_reader_from_file(invocation)?;
@@ -587,11 +590,26 @@ impl DexProgram {
 
         if method.class_descriptor == "Ljava/io/Reader;"
             && method.name == "read"
+            && method.proto.descriptor_is("([C)I")
+        {
+            // cite: libcore Reader.java#read
+            let invocation = invocation?;
+            let value = self.reader_read_char_array(invocation)?;
+
+            return Some(DexExecutionResult::Int(value));
+        }
+
+        if method.class_descriptor == "Ljava/io/Reader;"
+            && method.name == "read"
             && method.proto.descriptor_is("([CII)I")
         {
+            // cite: libcore Reader.java#read
             let invocation = invocation?;
-            self.require_string_reader_receiver(invocation)?;
-            let value = self.read_string_reader_buffer(invocation)?;
+            let value = if self.require_string_reader_receiver(invocation).is_some() {
+                self.read_string_reader_buffer(invocation)?
+            } else {
+                self.reader_read_char_buffer(invocation)?
+            };
 
             return Some(DexExecutionResult::Int(value));
         }
@@ -601,8 +619,9 @@ impl DexProgram {
             && method.proto.descriptor_is("()V")
         {
             let invocation = invocation?;
-            self.require_string_reader_receiver(invocation)?;
-            self.close_string_reader(invocation)?;
+            if self.require_string_reader_receiver(invocation).is_some() {
+                self.close_string_reader(invocation)?;
+            }
 
             return Some(DexExecutionResult::Void);
         }
@@ -697,6 +716,462 @@ impl DexProgram {
             && matches!(method.name.as_str(), "flush" | "close")
             && method.proto.descriptor_is("()V")
         {
+            return Some(DexExecutionResult::Void);
+        }
+
+        if method.class_descriptor == "Ljava/nio/charset/Charset;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("forName", "(Ljava/lang/String;)Ljava/nio/charset/Charset;") => {
+                    // cite: libcore Charset.java#forName
+                    let invocation = invocation?;
+                    let DexValue::String(name) = invocation.arguments.first()? else {
+                        return None;
+                    };
+                    let canonical = match name.to_ascii_uppercase().as_str() {
+                        "UTF-8" | "UTF8" => "UTF-8",
+                        "US-ASCII" | "ASCII" => "US-ASCII",
+                        "ISO-8859-1" | "ISO8859_1" | "LATIN1" => "ISO-8859-1",
+                        "UTF-16" | "UTF16" => "UTF-16",
+                        "UTF-16BE" => "UTF-16BE",
+                        "UTF-16LE" => "UTF-16LE",
+                        _ => {
+                            return Some(DexExecutionResult::Throw(
+                                self.allocate_generated_exception(DexGeneratedException {
+                                    class_descriptor:
+                                        "Ljava/nio/charset/UnsupportedCharsetException;".to_owned(),
+                                    detail_message: Some(name.to_string()),
+                                }),
+                            ));
+                        }
+                    };
+                    let charset = self.allocate_object("Ljava/nio/charset/Charset;".to_owned());
+                    let _ = self.write_stored_instance_field(
+                        &charset,
+                        &DexFieldId {
+                            class_descriptor: "Ljava/nio/charset/Charset;".to_owned(),
+                            type_descriptor: "Ljava/lang/String;".to_owned(),
+                            name: "name".to_owned(),
+                        },
+                        DexValue::String(std::rc::Rc::from(canonical)),
+                    );
+                    return Some(DexExecutionResult::Value(charset));
+                }
+                ("defaultCharset", "()Ljava/nio/charset/Charset;") => {
+                    // cite: libcore Charset.java#defaultCharset
+                    let charset = self.allocate_object("Ljava/nio/charset/Charset;".to_owned());
+                    let _ = self.write_stored_instance_field(
+                        &charset,
+                        &DexFieldId {
+                            class_descriptor: "Ljava/nio/charset/Charset;".to_owned(),
+                            type_descriptor: "Ljava/lang/String;".to_owned(),
+                            name: "name".to_owned(),
+                        },
+                        DexValue::String(std::rc::Rc::from("UTF-8")),
+                    );
+                    return Some(DexExecutionResult::Value(charset));
+                }
+                ("name" | "displayName" | "toString", "()Ljava/lang/String;") => {
+                    let invocation = invocation?;
+                    let name = self
+                        .read_stored_instance_field(
+                            invocation.arguments.first()?,
+                            &DexFieldId {
+                                class_descriptor: "Ljava/nio/charset/Charset;".to_owned(),
+                                type_descriptor: "Ljava/lang/String;".to_owned(),
+                                name: "name".to_owned(),
+                            },
+                        )
+                        .unwrap_or_else(|| DexValue::String(std::rc::Rc::from("UTF-8")));
+                    return Some(DexExecutionResult::Value(name));
+                }
+                _ => {}
+            }
+        }
+
+        if method.class_descriptor == "Ljava/security/cert/CertificateFactory;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("getInstance", "(Ljava/lang/String;)Ljava/security/cert/CertificateFactory;") => {
+                    // cite: libcore CertificateFactory.java#getInstance
+                    let invocation = invocation?;
+                    let DexValue::String(cert_type) = invocation.arguments.first()? else {
+                        return None;
+                    };
+                    if !cert_type.eq_ignore_ascii_case("X.509")
+                        && !cert_type.eq_ignore_ascii_case("X509")
+                    {
+                        return Some(DexExecutionResult::Throw(
+                            self.allocate_generated_exception(DexGeneratedException {
+                                class_descriptor: "Ljava/security/cert/CertificateException;"
+                                    .to_owned(),
+                                detail_message: Some(cert_type.to_string()),
+                            }),
+                        ));
+                    }
+                    let factory =
+                        self.allocate_object("Ljava/security/cert/CertificateFactory;".to_owned());
+                    let _ = self.write_stored_instance_field(
+                        &factory,
+                        &DexFieldId {
+                            class_descriptor: "Ljava/security/cert/CertificateFactory;".to_owned(),
+                            type_descriptor: "Ljava/lang/String;".to_owned(),
+                            name: "type".to_owned(),
+                        },
+                        DexValue::String(std::rc::Rc::from("X.509")),
+                    );
+                    return Some(DexExecutionResult::Value(factory));
+                }
+                ("getType", "()Ljava/lang/String;") => {
+                    return Some(DexExecutionResult::Value(DexValue::String(
+                        std::rc::Rc::from("X.509"),
+                    )));
+                }
+                (
+                    "generateCertificate",
+                    "(Ljava/io/InputStream;)Ljava/security/cert/Certificate;",
+                ) => {
+                    // cite: libcore CertificateFactory.java#generateCertificate
+                    let invocation = invocation?;
+                    let stream_arg = invocation.arguments.get(1)?;
+                    let bytes = self
+                        .resolve_input_stream_key(stream_arg)
+                        .and_then(|key| {
+                            let mut runtime = self.runtime.borrow_mut();
+                            let stream = runtime.input_stream_values.get_mut(&key)?;
+                            let rest = stream.bytes[stream.position..].to_vec();
+                            stream.position = stream.bytes.len();
+                            Some(rest)
+                        })
+                        .unwrap_or_default();
+                    let cert =
+                        self.allocate_object("Ljava/security/cert/X509Certificate;".to_owned());
+                    let elements: Vec<DexValue> = bytes
+                        .into_iter()
+                        .map(|b| DexValue::Int((b as i8) as i32))
+                        .collect();
+                    let byte_array = self.allocate_filled_array("[B".to_owned(), elements);
+                    let _ = self.write_stored_instance_field(
+                        &cert,
+                        &DexFieldId {
+                            class_descriptor: "Ljava/security/cert/Certificate;".to_owned(),
+                            type_descriptor: "[B".to_owned(),
+                            name: "encoded".to_owned(),
+                        },
+                        byte_array,
+                    );
+                    return Some(DexExecutionResult::Value(cert));
+                }
+                _ => {}
+            }
+        }
+
+        if matches!(
+            method.class_descriptor.as_str(),
+            "Ljava/security/cert/Certificate;" | "Ljava/security/cert/X509Certificate;"
+        ) && method.name == "getEncoded"
+            && method.proto.descriptor_is("()[B")
+        {
+            // cite: libcore Certificate.java#getEncoded
+            let invocation = invocation?;
+            let receiver = invocation.arguments.first()?;
+            let encoded = self
+                .read_stored_instance_field(
+                    receiver,
+                    &DexFieldId {
+                        class_descriptor: "Ljava/security/cert/Certificate;".to_owned(),
+                        type_descriptor: "[B".to_owned(),
+                        name: "encoded".to_owned(),
+                    },
+                )
+                .unwrap_or_else(|| self.allocate_filled_array("[B".to_owned(), Vec::new()));
+            return Some(DexExecutionResult::Value(encoded));
+        }
+
+        if matches!(
+            method.class_descriptor.as_str(),
+            "Ljava/security/cert/Certificate;" | "Ljava/security/cert/X509Certificate;"
+        ) && method.name == "getPublicKey"
+            && method.proto.descriptor_is("()Ljava/security/PublicKey;")
+        {
+            // cite: libcore Certificate.java#getPublicKey
+            let invocation = invocation?;
+            let receiver = invocation.arguments.first()?;
+            let encoded = self
+                .read_stored_instance_field(
+                    receiver,
+                    &DexFieldId {
+                        class_descriptor: "Ljava/security/cert/Certificate;".to_owned(),
+                        type_descriptor: "[B".to_owned(),
+                        name: "encoded".to_owned(),
+                    },
+                )
+                .unwrap_or_else(|| self.allocate_filled_array("[B".to_owned(), Vec::new()));
+            let key = self.allocate_object("Ljava/security/PublicKey;".to_owned());
+            let _ = self.write_stored_instance_field(
+                &key,
+                &DexFieldId {
+                    class_descriptor: "Ljava/security/Key;".to_owned(),
+                    type_descriptor: "[B".to_owned(),
+                    name: "encoded".to_owned(),
+                },
+                encoded,
+            );
+            return Some(DexExecutionResult::Value(key));
+        }
+
+        if matches!(
+            method.class_descriptor.as_str(),
+            "Ljava/security/Key;" | "Ljava/security/PublicKey;"
+        ) && method.name == "getEncoded"
+            && method.proto.descriptor_is("()[B")
+        {
+            // cite: libcore Key.java#getEncoded
+            let invocation = invocation?;
+            let receiver = invocation.arguments.first()?;
+            let encoded = self
+                .read_stored_instance_field(
+                    receiver,
+                    &DexFieldId {
+                        class_descriptor: "Ljava/security/Key;".to_owned(),
+                        type_descriptor: "[B".to_owned(),
+                        name: "encoded".to_owned(),
+                    },
+                )
+                .unwrap_or_else(|| self.allocate_filled_array("[B".to_owned(), Vec::new()));
+            return Some(DexExecutionResult::Value(encoded));
+        }
+
+        if method.class_descriptor == "Ljava/security/MessageDigest;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("getInstance", "(Ljava/lang/String;)Ljava/security/MessageDigest;") => {
+                    // cite: libcore MessageDigest.java#getInstance
+                    let invocation = invocation?;
+                    let DexValue::String(algorithm) = invocation.arguments.first()? else {
+                        return None;
+                    };
+                    let digest = self.allocate_object("Ljava/security/MessageDigest;".to_owned());
+                    let _ = self.write_stored_instance_field(
+                        &digest,
+                        &DexFieldId {
+                            class_descriptor: "Ljava/security/MessageDigest;".to_owned(),
+                            type_descriptor: "Ljava/lang/String;".to_owned(),
+                            name: "algorithm".to_owned(),
+                        },
+                        DexValue::String(algorithm.clone()),
+                    );
+                    let empty = self.allocate_filled_array("[B".to_owned(), Vec::new());
+                    let _ = self.write_stored_instance_field(
+                        &digest,
+                        &DexFieldId {
+                            class_descriptor: "Ljava/security/MessageDigest;".to_owned(),
+                            type_descriptor: "[B".to_owned(),
+                            name: "buffer".to_owned(),
+                        },
+                        empty,
+                    );
+                    return Some(DexExecutionResult::Value(digest));
+                }
+                ("update", "([B)V") => {
+                    // cite: libcore MessageDigest.java#update
+                    let invocation = invocation?;
+                    let receiver = invocation.arguments.first()?;
+                    let input_key = map_identity_key(invocation.arguments.get(1)?);
+                    let incoming: Vec<DexValue> = self
+                        .runtime
+                        .borrow()
+                        .array_entries
+                        .get(&input_key)
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(buf) = self.read_stored_instance_field(
+                        receiver,
+                        &DexFieldId {
+                            class_descriptor: "Ljava/security/MessageDigest;".to_owned(),
+                            type_descriptor: "[B".to_owned(),
+                            name: "buffer".to_owned(),
+                        },
+                    ) {
+                        if let Some(entries) = self
+                            .runtime
+                            .borrow_mut()
+                            .array_entries
+                            .get_mut(&map_identity_key(&buf))
+                        {
+                            entries.extend(incoming);
+                        }
+                    }
+                    return Some(DexExecutionResult::Void);
+                }
+                ("digest", "()[B") | ("digest", "([B)[B") => {
+                    // cite: libcore MessageDigest.java#digest
+                    let invocation = invocation?;
+                    let receiver = invocation.arguments.first()?;
+                    let mut raw_bytes: Vec<u8> = self
+                        .read_stored_instance_field(
+                            receiver,
+                            &DexFieldId {
+                                class_descriptor: "Ljava/security/MessageDigest;".to_owned(),
+                                type_descriptor: "[B".to_owned(),
+                                name: "buffer".to_owned(),
+                            },
+                        )
+                        .and_then(|buf| {
+                            let mut rt = self.runtime.borrow_mut();
+                            let entries = rt.array_entries.get_mut(&map_identity_key(&buf))?;
+                            let bytes = entries
+                                .drain(..)
+                                .map(|v| match v {
+                                    DexValue::Int(b) => b as u8,
+                                    _ => 0,
+                                })
+                                .collect();
+                            Some(bytes)
+                        })
+                        .unwrap_or_default();
+                    if let Some(extra) = invocation.arguments.get(1) {
+                        if let Some(entries) = self
+                            .runtime
+                            .borrow()
+                            .array_entries
+                            .get(&map_identity_key(extra))
+                        {
+                            raw_bytes.extend(entries.iter().map(|v| match v {
+                                DexValue::Int(b) => *b as u8,
+                                _ => 0,
+                            }));
+                        }
+                    }
+                    use sha2::{Digest, Sha256};
+                    let hashed = Sha256::digest(&raw_bytes);
+                    let elements: Vec<DexValue> = hashed
+                        .iter()
+                        .map(|b| DexValue::Int((*b as i8) as i32))
+                        .collect();
+                    return Some(DexExecutionResult::Value(
+                        self.allocate_filled_array("[B".to_owned(), elements),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        if method.class_descriptor == "Ljava/io/ByteArrayInputStream;"
+            && method.name == "<init>"
+            && matches!(method.proto.descriptor().as_str(), "([B)V" | "([BII)V")
+        {
+            // cite: libcore ByteArrayInputStream.java#ByteArrayInputStream
+            let invocation = invocation?;
+            let array_key = map_identity_key(&invocation.arguments[1]);
+            let (offset, length) = if invocation.arguments.len() == 4 {
+                let DexValue::Int(off) = invocation.arguments[2] else {
+                    return None;
+                };
+                let DexValue::Int(len) = invocation.arguments[3] else {
+                    return None;
+                };
+                (usize::try_from(off).ok()?, Some(usize::try_from(len).ok()?))
+            } else {
+                (0, None)
+            };
+            let bytes: Vec<u8> = {
+                let runtime = self.runtime.borrow();
+                let entries = runtime.array_entries.get(&array_key)?;
+                let len = length.unwrap_or(entries.len().saturating_sub(offset));
+                let end = offset
+                    .checked_add(len)
+                    .unwrap_or(entries.len())
+                    .min(entries.len());
+                entries[offset.min(entries.len())..end]
+                    .iter()
+                    .map(|v| match v {
+                        DexValue::Int(b) => *b as u8,
+                        _ => 0,
+                    })
+                    .collect()
+            };
+            let key = map_identity_key(&invocation.arguments[0]);
+            self.runtime
+                .borrow_mut()
+                .input_stream_values
+                .insert(key, InputStreamState { bytes, position: 0 });
+            return Some(DexExecutionResult::Void);
+        }
+
+        if method.class_descriptor == "Landroid/util/Base64;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("decode", "(Ljava/lang/String;I)[B") => {
+                    // cite: frameworks-base Base64.java#decode
+                    let invocation = invocation?;
+                    let DexValue::String(input) = invocation.arguments.first()? else {
+                        return None;
+                    };
+                    let decoded = decode_android_base64(input.as_bytes());
+                    let elements: Vec<DexValue> = decoded
+                        .into_iter()
+                        .map(|b| DexValue::Int((b as i8) as i32))
+                        .collect();
+                    return Some(DexExecutionResult::Value(
+                        self.allocate_filled_array("[B".to_owned(), elements),
+                    ));
+                }
+                ("decode", "([BI)[B") => {
+                    // cite: frameworks-base Base64.java#decode
+                    let invocation = invocation?;
+                    let array_key = map_identity_key(invocation.arguments.first()?);
+                    let raw: Vec<u8> = self
+                        .runtime
+                        .borrow()
+                        .array_entries
+                        .get(&array_key)?
+                        .iter()
+                        .map(|v| match v {
+                            DexValue::Int(b) => *b as u8,
+                            _ => 0,
+                        })
+                        .collect();
+                    let decoded = decode_android_base64(&raw);
+                    let elements: Vec<DexValue> = decoded
+                        .into_iter()
+                        .map(|b| DexValue::Int((b as i8) as i32))
+                        .collect();
+                    return Some(DexExecutionResult::Value(
+                        self.allocate_filled_array("[B".to_owned(), elements),
+                    ));
+                }
+                ("encodeToString", "([BI)Ljava/lang/String;") => {
+                    // cite: frameworks-base Base64.java#encodeToString
+                    let invocation = invocation?;
+                    let array_key = map_identity_key(invocation.arguments.first()?);
+                    let raw: Vec<u8> = self
+                        .runtime
+                        .borrow()
+                        .array_entries
+                        .get(&array_key)?
+                        .iter()
+                        .map(|v| match v {
+                            DexValue::Int(b) => *b as u8,
+                            _ => 0,
+                        })
+                        .collect();
+                    let encoded = encode_android_base64(&raw);
+                    return Some(DexExecutionResult::Value(DexValue::String(
+                        std::rc::Rc::from(encoded),
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        if matches!(
+            method.class_descriptor.as_str(),
+            "Ljava/io/Writer;" | "Ljava/io/StringWriter;"
+        ) && method.name == "write"
+            && method.proto.descriptor_is("([CII)V")
+        {
+            // cite: libcore Writer.java#write
+            // cite: libcore StringWriter.java#write
+            let invocation = invocation?;
+            self.writer_write_char_buffer(invocation)?;
+
             return Some(DexExecutionResult::Void);
         }
 
@@ -1345,20 +1820,34 @@ impl DexProgram {
             return None;
         }
 
-        let guest_path = file_path_from_value(self, &invocation.arguments[1])?;
-        let path = match self.resolved_guest_path_result(&guest_path, ExternalStorageAccess::Read) {
-            Ok(path) => path,
-            Err(detail) => {
-                let exception = self.file_not_found_exception_for_path(&guest_path, &detail);
-                return Some(DexExecutionResult::Throw(exception));
-            }
-        };
-        let bytes = match path.read() {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                let exception =
-                    self.file_not_found_exception_for_path(&guest_path, &error.to_string());
-                return Some(DexExecutionResult::Throw(exception));
+        let guest_path = self
+            .string_text(&invocation.arguments[1])
+            .or_else(|| file_path_from_value(self, &invocation.arguments[1]))?;
+        // cite: frameworks-base Application.java#getProcessName
+        let bytes = if guest_path == "/proc/self/cmdline"
+            || (guest_path.starts_with("/proc/") && guest_path.ends_with("/cmdline"))
+        {
+            let process_name = self.bootstrap_process_name().to_owned();
+            let mut buf = process_name.into_bytes();
+            buf.push(0);
+            buf
+        } else {
+            let path = match self
+                .resolved_guest_path_result(&guest_path, ExternalStorageAccess::Read)
+            {
+                Ok(path) => path,
+                Err(detail) => {
+                    let exception = self.file_not_found_exception_for_path(&guest_path, &detail);
+                    return Some(DexExecutionResult::Throw(exception));
+                }
+            };
+            match path.read() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let exception =
+                        self.file_not_found_exception_for_path(&guest_path, &error.to_string());
+                    return Some(DexExecutionResult::Throw(exception));
+                }
             }
         };
 
@@ -1422,6 +1911,111 @@ impl DexProgram {
         };
 
         Some(DexValue::String(std::rc::Rc::from(line)))
+    }
+
+    fn reader_read_char_array(&self, invocation: &DexInvocation) -> Option<i32> {
+        if invocation.arguments.len() != 2 {
+            return None;
+        }
+        let array_key = map_identity_key(&invocation.arguments[1]);
+        let array_len = self.runtime.borrow().array_entries.get(&array_key)?.len() as i32;
+        let mut expanded = invocation.clone();
+        expanded.arguments.push(DexValue::Int(0));
+        expanded.arguments.push(DexValue::Int(array_len));
+        if self.require_string_reader_receiver(&expanded).is_some() {
+            self.read_string_reader_buffer(&expanded)
+        } else {
+            self.reader_read_char_buffer(&expanded)
+        }
+    }
+
+    fn reader_read_char_buffer(&self, invocation: &DexInvocation) -> Option<i32> {
+        if invocation.arguments.len() != 4 {
+            return None;
+        }
+        let DexValue::Int(offset) = invocation.arguments[2] else {
+            return None;
+        };
+        let DexValue::Int(length) = invocation.arguments[3] else {
+            return None;
+        };
+        let offset = usize::try_from(offset).ok()?;
+        let length = usize::try_from(length).ok()?;
+        if length == 0 {
+            return Some(0);
+        }
+        let key = self.resolve_input_stream_key(&invocation.arguments[0])?;
+        let chunk = {
+            let mut runtime = self.runtime.borrow_mut();
+            let stream = runtime.input_stream_values.get_mut(&key)?;
+            if stream.position >= stream.bytes.len() {
+                return Some(-1);
+            }
+            let remaining = &stream.bytes[stream.position..];
+            let mut take_bytes = remaining.len().min(length);
+            while take_bytes > 0
+                && (remaining[take_bytes - 1] & 0xc0) == 0x80
+                && take_bytes < remaining.len()
+            {
+                take_bytes -= 1;
+            }
+            if take_bytes == 0 {
+                take_bytes = remaining.len().min(4);
+            }
+            let text = String::from_utf8_lossy(&remaining[..take_bytes]).into_owned();
+            stream.position += take_bytes;
+            text
+        };
+        let code_units: Vec<u16> = chunk.encode_utf16().collect();
+        let array_key = map_identity_key(&invocation.arguments[1]);
+        let mut runtime = self.runtime.borrow_mut();
+        let entries = runtime.array_entries.get_mut(&array_key)?;
+        if offset.checked_add(length)? > entries.len() {
+            return None;
+        }
+        let count = code_units.len().min(length);
+        for (i, unit) in code_units.into_iter().take(count).enumerate() {
+            entries[offset + i] = DexValue::Int(i32::from(unit));
+        }
+        Some(count as i32)
+    }
+
+    fn writer_write_char_buffer(&self, invocation: &DexInvocation) -> Option<()> {
+        if invocation.arguments.len() != 4 {
+            return None;
+        }
+        let DexValue::Int(offset) = invocation.arguments[2] else {
+            return None;
+        };
+        let DexValue::Int(length) = invocation.arguments[3] else {
+            return None;
+        };
+        let offset = usize::try_from(offset).ok()?;
+        let length = usize::try_from(length).ok()?;
+        let array_key = map_identity_key(&invocation.arguments[1]);
+        let units: Vec<u16> = {
+            let runtime = self.runtime.borrow();
+            let entries = runtime.array_entries.get(&array_key)?;
+            let end = offset.checked_add(length)?;
+            if end > entries.len() {
+                return None;
+            }
+            entries[offset..end]
+                .iter()
+                .map(|v| match v {
+                    DexValue::Int(code) => *code as u16,
+                    _ => 0,
+                })
+                .collect()
+        };
+        let text = String::from_utf16_lossy(&units);
+        let writer_key = map_identity_key(&invocation.arguments[0]);
+        let mut runtime = self.runtime.borrow_mut();
+        if let Some(buffer) = runtime.string_writer_values.get_mut(&writer_key) {
+            buffer.push_str(&text);
+            return Some(());
+        }
+        Some(())
     }
 
     fn file_not_found_exception_for_path(&self, path: &str, detail: &str) -> DexValue {
@@ -1725,4 +2319,52 @@ fn throwable_detail_message_field() -> DexFieldId {
         type_descriptor: "Ljava/lang/String;".to_owned(),
         name: "detailMessage".to_owned(),
     }
+}
+
+fn decode_android_base64(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity((input.len() * 3) / 4);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &byte in input {
+        let val = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => break,
+            _ => continue,
+        };
+        acc = (acc << 6) | u32::from(val);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+        }
+    }
+    out
+}
+
+fn encode_android_base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = u32::from(chunk.get(1).copied().unwrap_or(0));
+        let b2 = u32::from(chunk.get(2).copied().unwrap_or(0));
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((triple >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(triple & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }

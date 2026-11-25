@@ -1020,6 +1020,28 @@ pub(in crate::dex_run) fn bootstrap_static_field(field: &DexFieldId) -> Option<D
         }
     }
 
+    // cite: libcore Collections.java#EMPTY_LIST, EMPTY_SET, EMPTY_MAP
+    if field.class_descriptor == "Ljava/util/Collections;" {
+        match (field.name.as_str(), field.type_descriptor.as_str()) {
+            ("EMPTY_LIST", "Ljava/util/List;") => {
+                return Some(DexValue::Reference(std::rc::Rc::from(
+                    "Ljava/util/List;:collections:emptyList",
+                )));
+            }
+            ("EMPTY_SET", "Ljava/util/Set;") => {
+                return Some(DexValue::Reference(std::rc::Rc::from(
+                    "Ljava/util/Set;:collections:emptySet",
+                )));
+            }
+            ("EMPTY_MAP", "Ljava/util/Map;") => {
+                return Some(DexValue::Reference(std::rc::Rc::from(
+                    "Ljava/util/Map;:collections:emptyMap",
+                )));
+            }
+            _ => {}
+        }
+    }
+
     // cite: libcore Boolean.java#TYPE
     if field.name == "TYPE" && field.type_descriptor == "Ljava/lang/Class;" {
         let primitive = match field.class_descriptor.as_str() {
@@ -1715,6 +1737,17 @@ pub(in crate::dex_run) fn bootstrap_static_field(field: &DexFieldId) -> Option<D
         return Some(DexValue::Reference(std::rc::Rc::from(
             "Lsun/misc/Unsafe;:theUnsafe",
         )));
+    }
+
+    // cite: frameworks-base DisplayMetrics.java#DENSITY_DEVICE_STABLE, DENSITY_DEFAULT
+    if field.class_descriptor == "Landroid/util/DisplayMetrics;"
+        && field.type_descriptor == "I"
+        && matches!(
+            field.name.as_str(),
+            "DENSITY_DEVICE_STABLE" | "DENSITY_DEFAULT" | "DENSITY_MEDIUM"
+        )
+    {
+        return Some(DexValue::Int(BOOTSTRAP_DISPLAY_DENSITY_DPI));
     }
 
     None

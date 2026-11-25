@@ -199,14 +199,16 @@ fn run_dex_run(program: &OsStr, args: Vec<OsString>) -> Result<()> {
 }
 
 fn run_install(program: &OsStr, args: Vec<OsString>) -> Result<()> {
-    if args.len() != 1 {
+    if args.is_empty() {
         return Err(WinedroidError::new(format!(
-            "install expects exactly one APK path\n\n{}",
+            "install expects a base APK path and optional split APK paths\n\n{}",
             usage(program)
         )));
     }
 
-    launch::install(&PathBuf::from(&args[0]))
+    let base_apk = PathBuf::from(&args[0]);
+    let split_apks: Vec<PathBuf> = args[1..].iter().map(PathBuf::from).collect();
+    launch::install_set(&base_apk, &split_apks)
 }
 
 fn run_list(program: &OsStr, args: Vec<OsString>) -> Result<()> {
@@ -227,7 +229,13 @@ fn run_list(program: &OsStr, args: Vec<OsString>) -> Result<()> {
 
     for artifact in &installed {
         println!("{}", artifact.package_name);
-        println!("  launch activity: {}", artifact.launch_activity);
+        println!(
+            "  launch activity: {}",
+            artifact
+                .launch_activity
+                .as_deref()
+                .unwrap_or("none (headless/multi-launcher)")
+        );
         println!("  source: {}", artifact.source_apk.display());
         println!("  size: {} bytes", artifact.source_size);
     }
@@ -245,6 +253,15 @@ fn run_uninstall(program: &OsStr, args: Vec<OsString>) -> Result<()> {
 }
 
 fn run_launch_installed(program: &OsStr, args: Vec<OsString>) -> Result<()> {
+    if args.len() == 3 && args[0] == OsStr::new("--activity") {
+        let activity = args[1]
+            .to_str()
+            .ok_or_else(|| WinedroidError::new("launch activity name is not valid UTF-8"))?;
+        let package_name = args[2]
+            .to_str()
+            .ok_or_else(|| WinedroidError::new("launch package name is not valid UTF-8"))?;
+        return launch::launch_installed_activity(package_name, Some(activity));
+    }
     let package_name = single_package_argument(program, "launch", &args)?;
     launch::launch_installed(package_name)
 }

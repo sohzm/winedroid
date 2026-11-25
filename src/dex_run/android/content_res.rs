@@ -2206,7 +2206,28 @@ pub(in crate::dex_run) fn drawable_resource_value(resource_id: u32) -> DexValue 
 impl DexProgram {
     pub(in crate::dex_run) fn drawable_resource_value(&self, resource_id: u32) -> DexValue {
         self.bitmap_drawable_resource_value(resource_id)
+            .or_else(|| self.vector_drawable_resource_value(resource_id))
             .unwrap_or_else(|| drawable_resource_value(resource_id))
+    }
+
+    // cite: frameworks-base DrawableInflater.java#inflateFromTag
+    fn vector_drawable_resource_value(&self, resource_id: u32) -> Option<DexValue> {
+        let resource = self.resolve_resource_file(resource_id).ok()??;
+        if !resource.path.ends_with(".xml") {
+            return None;
+        }
+        let bytes = self.read_raw_resource_bytes(resource_id as i32).ok()?;
+        let events = binary_xml::parse_binary_xml(&bytes).ok()?;
+        let is_vector = events.iter().find_map(|event| match event {
+            XmlEvent::Start(element) => Some(element.name == "vector"),
+            _ => None,
+        })?;
+        if !is_vector {
+            return None;
+        }
+        Some(DexValue::Reference(std::rc::Rc::from(format!(
+            "Landroid/graphics/drawable/VectorDrawable;:resource:{resource_id}"
+        ))))
     }
 
     pub(in crate::dex_run) fn bitmap_drawable_get_bitmap(
@@ -2824,35 +2845,80 @@ pub(in crate::dex_run) fn context_system_service_by_class(
     ))))
 }
 
-// cite: frameworks-base SystemServiceRegistry.java#ACCESSIBILITY_SERVICE, AccessibilityManager, AUTOFILL_MANAGER_SERVICE, AutofillManager, CLIPBOARD_SERVICE, ClipboardManager, INPUT_METHOD_SERVICE, InputMethodManager, LAYOUT_INFLATER_SERVICE, LayoutInflater, VIBRATOR_MANAGER_SERVICE, VibratorManager, SystemVibratorManager, WINDOW_SERVICE, WindowManager, WindowManagerImpl
-// cite: frameworks-base Context.java#getSystemService, CONNECTIVITY_SERVICE
+// cite: frameworks-base SystemServiceRegistry.java#ACCESSIBILITY_SERVICE, AccessibilityManager, ACCOUNT_SERVICE, AccountManager, ACTIVITY_SERVICE, ActivityManager, ALARM_SERVICE, AlarmManager, APP_OPS_SERVICE, AppOpsManager, AUDIO_SERVICE, AudioManager, AUTOFILL_MANAGER_SERVICE, AutofillManager, BATTERY_SERVICE, BatteryManager, CLIPBOARD_SERVICE, ClipboardManager, DISPLAY_SERVICE, DisplayManager, DOWNLOAD_SERVICE, DownloadManager, INPUT_METHOD_SERVICE, InputMethodManager, KEYGUARD_SERVICE, KeyguardManager, LAYOUT_INFLATER_SERVICE, LayoutInflater, LOCATION_SERVICE, LocationManager, NOTIFICATION_SERVICE, NotificationManager, POWER_SERVICE, PowerManager, SEARCH_SERVICE, SearchManager, SENSOR_SERVICE, SensorManager, SHORTCUT_SERVICE, ShortcutManager, STORAGE_SERVICE, StorageManager, STORAGE_STATS_SERVICE, StorageStatsManager, UI_MODE_SERVICE, UiModeManager, USAGE_STATS_SERVICE, UsageStatsManager, USER_SERVICE, UserManager, VIBRATOR_MANAGER_SERVICE, VibratorManager, SystemVibratorManager, WINDOW_SERVICE, WindowManager, WindowManagerImpl
+// cite: frameworks-base Context.java#getSystemService, CONNECTIVITY_SERVICE, JOB_SCHEDULER_SERVICE, WIFI_SERVICE
 fn system_service_runtime_descriptor(service_name: &str) -> Option<&'static str> {
     match service_name {
         "accessibility" => Some("Landroid/view/accessibility/AccessibilityManager;"),
+        "account" => Some("Landroid/accounts/AccountManager;"),
+        "activity" => Some("Landroid/app/ActivityManager;"),
+        "alarm" => Some("Landroid/app/AlarmManager;"),
+        "appops" => Some("Landroid/app/AppOpsManager;"),
+        "audio" => Some("Landroid/media/AudioManager;"),
         "autofill" => Some("Landroid/view/autofill/AutofillManager;"),
+        "batterymanager" => Some("Landroid/os/BatteryManager;"),
         "clipboard" => Some("Landroid/content/ClipboardManager;"),
         "connectivity" => Some("Landroid/net/ConnectivityManager;"),
+        "display" => Some("Landroid/hardware/display/DisplayManager;"),
+        "download" => Some("Landroid/app/DownloadManager;"),
         "input_method" => Some("Landroid/view/inputmethod/InputMethodManager;"),
+        "jobscheduler" => Some("Landroid/app/job/JobScheduler;"),
+        "keyguard" => Some("Landroid/app/KeyguardManager;"),
         "layout_inflater" => Some("Landroid/view/LayoutInflater;"),
+        "location" => Some("Landroid/location/LocationManager;"),
+        "notification" => Some("Landroid/app/NotificationManager;"),
+        "power" => Some("Landroid/os/PowerManager;"),
+        "search" => Some("Landroid/app/SearchManager;"),
+        "sensor" => Some("Landroid/hardware/SensorManager;"),
+        "shortcut" => Some("Landroid/content/pm/ShortcutManager;"),
+        "storage" => Some("Landroid/os/storage/StorageManager;"),
+        "storagestats" => Some("Landroid/app/usage/StorageStatsManager;"),
+        "uimode" => Some("Landroid/app/UiModeManager;"),
+        "usagestats" => Some("Landroid/app/usage/UsageStatsManager;"),
+        "user" => Some("Landroid/os/UserManager;"),
         "vibrator_manager" => Some("Landroid/os/SystemVibratorManager;"),
+        "wifi" => Some("Landroid/net/wifi/WifiManager;"),
         "window" => Some("Landroid/view/WindowManagerImpl;"),
         _ => None,
     }
 }
 
 // cite: frameworks-base SystemServiceRegistry.java#registerService
-// cite: frameworks-base Context.java#CLIPBOARD_SERVICE, CONNECTIVITY_SERVICE, VIBRATOR_SERVICE, VIBRATOR_MANAGER_SERVICE
+// cite: frameworks-base Context.java#CLIPBOARD_SERVICE, CONNECTIVITY_SERVICE, JOB_SCHEDULER_SERVICE, NOTIFICATION_SERVICE, POWER_SERVICE, VIBRATOR_SERVICE, VIBRATOR_MANAGER_SERVICE, WIFI_SERVICE
 fn system_service_name_for_class(class_descriptor: &str) -> Option<&'static str> {
     match class_descriptor {
+        "Landroid/view/accessibility/AccessibilityManager;" => Some("accessibility"),
+        "Landroid/accounts/AccountManager;" => Some("account"),
+        "Landroid/app/ActivityManager;" => Some("activity"),
+        "Landroid/app/AlarmManager;" => Some("alarm"),
+        "Landroid/app/AppOpsManager;" => Some("appops"),
+        "Landroid/media/AudioManager;" => Some("audio"),
+        "Landroid/view/autofill/AutofillManager;" => Some("autofill"),
+        "Landroid/os/BatteryManager;" => Some("batterymanager"),
         "Landroid/content/ClipboardManager;" | "Landroid/text/ClipboardManager;" => {
             Some("clipboard")
         }
         "Landroid/net/ConnectivityManager;" => Some("connectivity"),
-        "Landroid/view/autofill/AutofillManager;" => Some("autofill"),
+        "Landroid/hardware/display/DisplayManager;" => Some("display"),
+        "Landroid/app/DownloadManager;" => Some("download"),
         "Landroid/view/inputmethod/InputMethodManager;" => Some("input_method"),
+        "Landroid/app/job/JobScheduler;" => Some("jobscheduler"),
+        "Landroid/app/KeyguardManager;" => Some("keyguard"),
         "Landroid/view/LayoutInflater;" => Some("layout_inflater"),
+        "Landroid/location/LocationManager;" => Some("location"),
+        "Landroid/app/NotificationManager;" => Some("notification"),
+        "Landroid/os/PowerManager;" => Some("power"),
+        "Landroid/app/SearchManager;" => Some("search"),
+        "Landroid/hardware/SensorManager;" => Some("sensor"),
+        "Landroid/content/pm/ShortcutManager;" => Some("shortcut"),
+        "Landroid/os/storage/StorageManager;" => Some("storage"),
+        "Landroid/app/usage/StorageStatsManager;" => Some("storagestats"),
+        "Landroid/app/UiModeManager;" => Some("uimode"),
+        "Landroid/app/usage/UsageStatsManager;" => Some("usagestats"),
+        "Landroid/os/UserManager;" => Some("user"),
         "Landroid/os/Vibrator;" => Some("vibrator"),
         "Landroid/os/VibratorManager;" => Some("vibrator_manager"),
+        "Landroid/net/wifi/WifiManager;" => Some("wifi"),
         "Landroid/view/WindowManager;" => Some("window"),
         _ => None,
     }
@@ -3471,11 +3537,24 @@ fn xml_string_int(value: &str) -> Option<i32> {
 
 fn android_framework_attr_name(resource_id: u32) -> Option<&'static str> {
     match resource_id {
-        // cite: frameworks-base public-final.xml#gravity
+        // cite: frameworks-base public-final.xml#label, icon, name, enabled, gravity, id, tag, background, visibility, src, tint, text, height, width, title, defaultValue, autoVerify
+        0x0101_0001 => Some("label"),
+        0x0101_0002 => Some("icon"),
+        0x0101_0003 => Some("name"),
+        0x0101_000e => Some("enabled"),
         16842927 => Some("gravity"),
+        0x0101_00d0 => Some("id"),
+        0x0101_00d1 => Some("tag"),
+        0x0101_00d4 => Some("background"),
+        0x0101_00dc => Some("visibility"),
+        0x0101_0119 => Some("src"),
+        16843041 => Some("tint"),
+        0x0101_014f => Some("text"),
         16843093 => Some("height"),
         16843097 => Some("width"),
-        16843041 => Some("tint"),
+        0x0101_01e1 => Some("title"),
+        0x0101_01ed => Some("defaultValue"),
+        0x0101_04ee => Some("autoVerify"),
         16843754 => Some("autoMirrored"),
         16843778 => Some("viewportWidth"),
         16843779 => Some("viewportHeight"),

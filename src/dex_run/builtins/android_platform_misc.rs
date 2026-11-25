@@ -13,19 +13,15 @@ impl DexProgram {
             return Some(DexExecutionResult::Int(0));
         }
 
+        // cite: frameworks-base Log.java#v, d, i, w, e, wtf
         if method.class_descriptor == "Landroid/util/Log;"
-            && method.name == "i"
-            && method
-                .proto
-                .descriptor_is("(Ljava/lang/String;Ljava/lang/String;)I")
-        {
-            return Some(DexExecutionResult::Int(0));
-        }
-
-        if method.class_descriptor == "Landroid/util/Log;"
-            && method.name == "e"
-            && method.proto.descriptor()
-                == "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I"
+            && matches!(method.name.as_str(), "v" | "d" | "i" | "w" | "e" | "wtf")
+            && matches!(
+                method.proto.descriptor().as_str(),
+                "(Ljava/lang/String;Ljava/lang/String;)I"
+                    | "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I"
+                    | "(Ljava/lang/String;Ljava/lang/Throwable;)I"
+            )
         {
             return Some(DexExecutionResult::Int(0));
         }
@@ -76,6 +72,177 @@ impl DexProgram {
                 .descriptor_is("(Landroid/os/StrictMode$VmPolicy;)V")
         {
             return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base StrictMode.java#noteSlowCall
+        if method.matches_builtin_signature(
+            "Landroid/os/StrictMode;",
+            "noteSlowCall",
+            "(Ljava/lang/String;)V",
+        ) {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base NotificationChannel.java#NotificationChannel, setDescription, setShowBadge, setSound, enableLights, enableVibration, getId
+        if method.class_descriptor == "Landroid/app/NotificationChannel;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("<init>", "(Ljava/lang/String;Ljava/lang/CharSequence;I)V") => {
+                    let invocation = invocation?;
+                    let receiver = invocation.arguments.first()?;
+                    if let Some(id) = self.string_text(invocation.arguments.get(1)?) {
+                        self.write_stored_instance_field(
+                            receiver,
+                            &DexFieldId {
+                                class_descriptor: "Landroid/app/NotificationChannel;".to_owned(),
+                                type_descriptor: "Ljava/lang/String;".to_owned(),
+                                name: "mId".to_owned(),
+                            },
+                            DexValue::String(std::rc::Rc::from(id)),
+                        );
+                    }
+                    return Some(DexExecutionResult::Void);
+                }
+                ("setDescription", "(Ljava/lang/String;)V")
+                | ("setShowBadge", "(Z)V")
+                | ("setSound", "(Landroid/net/Uri;Landroid/media/AudioAttributes;)V")
+                | ("enableLights", "(Z)V")
+                | ("enableVibration", "(Z)V") => {
+                    return Some(DexExecutionResult::Void);
+                }
+                ("getId", "()Ljava/lang/String;") => {
+                    let invocation = invocation?;
+                    let receiver = invocation.arguments.first()?;
+                    let id = self
+                        .read_stored_instance_field(
+                            receiver,
+                            &DexFieldId {
+                                class_descriptor: "Landroid/app/NotificationChannel;".to_owned(),
+                                type_descriptor: "Ljava/lang/String;".to_owned(),
+                                name: "mId".to_owned(),
+                            },
+                        )
+                        .unwrap_or(DexValue::Null);
+                    return Some(DexExecutionResult::Value(id));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base NotificationManager.java#createNotificationChannel, createNotificationChannels, getNotificationChannel, areNotificationsEnabled, notify, cancel, cancelAll
+        if method.class_descriptor == "Landroid/app/NotificationManager;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("createNotificationChannel", "(Landroid/app/NotificationChannel;)V")
+                | ("createNotificationChannels", "(Ljava/util/List;)V")
+                | ("notify", "(ILandroid/app/Notification;)V")
+                | ("notify", "(Ljava/lang/String;ILandroid/app/Notification;)V")
+                | ("cancel", "(I)V")
+                | ("cancel", "(Ljava/lang/String;I)V")
+                | ("cancelAll", "()V") => {
+                    return Some(DexExecutionResult::Void);
+                }
+                (
+                    "getNotificationChannel",
+                    "(Ljava/lang/String;)Landroid/app/NotificationChannel;",
+                ) => {
+                    return Some(DexExecutionResult::Value(DexValue::Null));
+                }
+                ("areNotificationsEnabled", "()Z") => {
+                    return Some(DexExecutionResult::Int(1));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base ActivityManager.java#isLowRamDevice, getMemoryClass, getLargeMemoryClass, getRunningAppProcesses
+        if method.class_descriptor == "Landroid/app/ActivityManager;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("isLowRamDevice", "()Z") => {
+                    return Some(DexExecutionResult::Int(0));
+                }
+                ("getMemoryClass", "()I") => {
+                    return Some(DexExecutionResult::Int(256));
+                }
+                ("getLargeMemoryClass", "()I") => {
+                    return Some(DexExecutionResult::Int(512));
+                }
+                ("getRunningAppProcesses", "()Ljava/util/List;") => {
+                    let list = self.allocate_object("Ljava/util/ArrayList;".to_owned());
+                    self.runtime
+                        .borrow_mut()
+                        .list_entries
+                        .insert(map_identity_key(&list), Vec::new());
+                    return Some(DexExecutionResult::Value(list));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base Context.java#JOB_SCHEDULER_SERVICE
+        if method.class_descriptor == "Landroid/app/job/JobScheduler;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("forNamespace", "(Ljava/lang/String;)Landroid/app/job/JobScheduler;") => {
+                    return Some(DexExecutionResult::Value(
+                        self.allocate_object("Landroid/app/job/JobScheduler;".to_owned()),
+                    ));
+                }
+                ("getAllPendingJobs", "()Ljava/util/List;") => {
+                    let list = self.allocate_object("Ljava/util/ArrayList;".to_owned());
+                    self.runtime
+                        .borrow_mut()
+                        .list_entries
+                        .insert(map_identity_key(&list), Vec::new());
+                    return Some(DexExecutionResult::Value(list));
+                }
+                ("schedule", "(Landroid/app/job/JobInfo;)I") => {
+                    return Some(DexExecutionResult::Int(1));
+                }
+                ("cancel", "(I)V") | ("cancelAll", "()V") => {
+                    return Some(DexExecutionResult::Void);
+                }
+                ("getPendingJob", "(I)Landroid/app/job/JobInfo;") => {
+                    return Some(DexExecutionResult::Value(DexValue::Null));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base PowerManager.java#newWakeLock, isInteractive, isPowerSaveMode, isDeviceIdleMode, isIgnoringBatteryOptimizations
+        if method.class_descriptor == "Landroid/os/PowerManager;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("newWakeLock", "(ILjava/lang/String;)Landroid/os/PowerManager$WakeLock;")
+                | ("newWakeLock", "(ILjava/lang/String;I)Landroid/os/PowerManager$WakeLock;") => {
+                    return Some(DexExecutionResult::Value(
+                        self.allocate_object("Landroid/os/PowerManager$WakeLock;".to_owned()),
+                    ));
+                }
+                ("isInteractive", "()Z") => {
+                    return Some(DexExecutionResult::Int(1));
+                }
+                ("isPowerSaveMode", "()Z") | ("isDeviceIdleMode", "()Z") => {
+                    return Some(DexExecutionResult::Int(0));
+                }
+                ("isIgnoringBatteryOptimizations", "(Ljava/lang/String;)Z") => {
+                    return Some(DexExecutionResult::Int(1));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base PowerManager.java#newWakeLock
+        if method.class_descriptor == "Landroid/os/PowerManager$WakeLock;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("acquire", "()V")
+                | ("acquire", "(J)V")
+                | ("release", "()V")
+                | ("release", "(I)V")
+                | ("setReferenceCounted", "(Z)V") => {
+                    return Some(DexExecutionResult::Void);
+                }
+                ("isHeld", "()Z") => {
+                    return Some(DexExecutionResult::Int(0));
+                }
+                _ => {}
+            }
         }
 
         if method.class_descriptor == "Landroid/database/ContentObserver;"
@@ -433,9 +600,10 @@ impl DexProgram {
             return Some(DexExecutionResult::Value(value));
         }
 
+        // cite: frameworks-base SparseArray.java#SparseArray
         if method.class_descriptor == "Landroid/util/SparseArray;"
             && method.name == "<init>"
-            && method.proto.descriptor_is("()V")
+            && matches!(method.proto.descriptor().as_str(), "()V" | "(I)V")
         {
             let invocation = invocation?;
             self.initialize_sparse_array(invocation)?;
@@ -453,13 +621,65 @@ impl DexProgram {
             return Some(DexExecutionResult::Int(value));
         }
 
+        // cite: frameworks-base SparseArray.java#put, append
         if method.class_descriptor == "Landroid/util/SparseArray;"
-            && method.name == "put"
+            && matches!(method.name.as_str(), "put" | "append")
             && method.proto.descriptor_is("(ILjava/lang/Object;)V")
         {
             let invocation = invocation?;
             self.sparse_array_put(invocation)?;
 
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base StateSet.java#trimStateSet
+        if method.matches_builtin_signature("Landroid/util/StateSet;", "trimStateSet", "([II)[I") {
+            let invocation = invocation?;
+            let states = invocation.arguments.first()?;
+            let DexValue::Int(new_size) = invocation.arguments.get(1)? else {
+                return None;
+            };
+            let new_size = (*new_size).max(0) as usize;
+            let values = self
+                .runtime
+                .borrow()
+                .array_entries
+                .get(&map_identity_key(states))
+                .cloned()
+                .unwrap_or_default();
+            if values.len() == new_size {
+                return Some(DexExecutionResult::Value(states.clone()));
+            }
+            let mut trimmed = values.into_iter().take(new_size).collect::<Vec<_>>();
+            trimmed.resize(new_size, DexValue::Int(0));
+            return Some(DexExecutionResult::Value(
+                self.allocate_filled_array("[I".to_owned(), trimmed),
+            ));
+        }
+
+        // cite: frameworks-base AttributeSet.java#getAttributeCount, getClassAttribute
+        if method.class_descriptor == "Landroid/util/AttributeSet;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("getAttributeCount", "()I") => return Some(DexExecutionResult::Int(0)),
+                ("getClassAttribute", "()Ljava/lang/String;") => {
+                    return Some(DexExecutionResult::Value(DexValue::Null));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base LinearInterpolator.java#LinearInterpolator
+        // cite: frameworks-base DecelerateInterpolator.java#DecelerateInterpolator
+        // cite: frameworks-base PathInterpolator.java#PathInterpolator
+        if matches!(
+            method.class_descriptor.as_str(),
+            "Landroid/view/animation/LinearInterpolator;"
+                | "Landroid/view/animation/DecelerateInterpolator;"
+                | "Landroid/view/animation/AccelerateInterpolator;"
+                | "Landroid/view/animation/AccelerateDecelerateInterpolator;"
+                | "Landroid/view/animation/PathInterpolator;"
+        ) && method.name == "<init>"
+        {
             return Some(DexExecutionResult::Void);
         }
 
@@ -1821,6 +2041,134 @@ impl DexProgram {
             let value = self.sqlite_cursor_move_to_next(invocation)?;
 
             return Some(DexExecutionResult::Int(value));
+        }
+
+        // cite: frameworks-base AbstractCursor.java#moveToPosition, moveToFirst, moveToLast, moveToPrevious, getPosition
+        if method.class_descriptor == "Landroid/database/Cursor;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("moveToFirst", "()Z") => {
+                    let invocation = invocation?;
+                    let cursor_key = sqlite_cursor_key(invocation)?;
+                    let mut runtime = self.runtime.borrow_mut();
+                    let cursor = runtime.sqlite_cursors.get_mut(&cursor_key)?;
+                    if cursor.rows.is_empty() {
+                        cursor.position = 0;
+                        return Some(DexExecutionResult::Int(0));
+                    }
+                    cursor.position = 0;
+                    return Some(DexExecutionResult::Int(1));
+                }
+                ("moveToLast", "()Z") => {
+                    let invocation = invocation?;
+                    let cursor_key = sqlite_cursor_key(invocation)?;
+                    let mut runtime = self.runtime.borrow_mut();
+                    let cursor = runtime.sqlite_cursors.get_mut(&cursor_key)?;
+                    if cursor.rows.is_empty() {
+                        cursor.position = -1;
+                        return Some(DexExecutionResult::Int(0));
+                    }
+                    cursor.position = (cursor.rows.len() - 1) as isize;
+                    return Some(DexExecutionResult::Int(1));
+                }
+                ("moveToPrevious", "()Z") => {
+                    let invocation = invocation?;
+                    let cursor_key = sqlite_cursor_key(invocation)?;
+                    let mut runtime = self.runtime.borrow_mut();
+                    let cursor = runtime.sqlite_cursors.get_mut(&cursor_key)?;
+                    let prev = cursor.position - 1;
+                    if prev >= 0 && (prev as usize) < cursor.rows.len() {
+                        cursor.position = prev;
+                        return Some(DexExecutionResult::Int(1));
+                    }
+                    cursor.position = -1;
+                    return Some(DexExecutionResult::Int(0));
+                }
+                ("moveToPosition", "(I)Z") => {
+                    let invocation = invocation?;
+                    let cursor_key = map_identity_key(invocation.arguments.first()?);
+                    let DexValue::Int(pos) = invocation.arguments.get(1)? else {
+                        return None;
+                    };
+                    let mut runtime = self.runtime.borrow_mut();
+                    let cursor = runtime.sqlite_cursors.get_mut(&cursor_key)?;
+                    let row_count = isize::try_from(cursor.rows.len()).ok()?;
+                    let target = *pos as isize;
+                    if target < 0 {
+                        cursor.position = -1;
+                        return Some(DexExecutionResult::Int(0));
+                    }
+                    if target >= row_count {
+                        cursor.position = row_count;
+                        return Some(DexExecutionResult::Int(0));
+                    }
+                    cursor.position = target;
+                    return Some(DexExecutionResult::Int(1));
+                }
+                ("getPosition", "()I") => {
+                    let invocation = invocation?;
+                    let cursor_key = sqlite_cursor_key(invocation)?;
+                    let runtime = self.runtime.borrow();
+                    let cursor = runtime.sqlite_cursors.get(&cursor_key)?;
+                    return Some(DexExecutionResult::Int(cursor.position as i32));
+                }
+                // cite: frameworks-base AbstractCursor.java#getCount
+                ("getCount", "()I") => {
+                    let invocation = invocation?;
+                    let cursor_key = sqlite_cursor_key(invocation)?;
+                    let runtime = self.runtime.borrow();
+                    let cursor = runtime.sqlite_cursors.get(&cursor_key)?;
+                    return Some(DexExecutionResult::Int(cursor.rows.len() as i32));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: frameworks-base SQLiteDatabase.java#isWriteAheadLoggingEnabled
+        if method.matches_builtin_signature(
+            "Landroid/database/sqlite/SQLiteDatabase;",
+            "isWriteAheadLoggingEnabled",
+            "()Z",
+        ) {
+            return Some(DexExecutionResult::Int(0));
+        }
+
+        // cite: frameworks-base SQLiteStatement.java#executeUpdateDelete
+        if method.matches_builtin_signature(
+            "Landroid/database/sqlite/SQLiteStatement;",
+            "executeUpdateDelete",
+            "()I",
+        ) {
+            let invocation = invocation?;
+            let _ = self.sqlite_statement_execute(invocation)?;
+            return Some(DexExecutionResult::Int(1));
+        }
+
+        // cite: frameworks-base PendingIntent.java#getBroadcast, cancel
+        if method.matches_builtin_signature(
+            "Landroid/app/PendingIntent;",
+            "getBroadcast",
+            "(Landroid/content/Context;ILandroid/content/Intent;I)Landroid/app/PendingIntent;",
+        ) {
+            return Some(DexExecutionResult::Value(
+                self.allocate_object("Landroid/app/PendingIntent;".to_owned()),
+            ));
+        }
+        if method.matches_builtin_signature("Landroid/app/PendingIntent;", "cancel", "()V") {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base ActivityManager.java#getHistoricalProcessExitReasons
+        if method.matches_builtin_signature(
+            "Landroid/app/ActivityManager;",
+            "getHistoricalProcessExitReasons",
+            "(Ljava/lang/String;II)Ljava/util/List;",
+        ) {
+            let list = self.allocate_object("Ljava/util/ArrayList;".to_owned());
+            self.runtime
+                .borrow_mut()
+                .list_entries
+                .insert(map_identity_key(&list), Vec::new());
+            return Some(DexExecutionResult::Value(list));
         }
 
         // cite: frameworks-base MimeTypeMap.java#getSingleton

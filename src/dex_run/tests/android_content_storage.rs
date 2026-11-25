@@ -719,8 +719,7 @@ fn context_shared_preferences_persist_in_the_receivers_storage_domain() {
 #[test]
 fn cts_application_info_exposes_both_private_roots_and_credential_default() {
     // cite: cts ApplicationInfoTest.java#verifyDefaultValues
-    // cite: frameworks-base ScanPackageUtils.java#applyPolicy
-    // cite: frameworks-base ApplicationInfo.java#initForUser
+    // cite: frameworks-base ApplicationInfo.java#initForUser, PRIVATE_FLAG_DEFAULT_TO_DEVICE_PROTECTED_STORAGE, PRIVATE_FLAG_DIRECT_BOOT_AWARE
     let app_dir = test_app_data_dir("application_info_private_roots");
     let data_dir = app_dir.join("apps/com.example/data");
     let shared_dir = app_dir.join("storage");
@@ -878,7 +877,6 @@ fn sqlite_guest_vfs_uses_the_held_private_root_after_visible_replacement() {
 #[cfg(unix)]
 #[test]
 fn cts_sqlite_transactions_persist_through_guest_vfs_reopen() {
-    // cite: cts SQLiteDatabaseTest.java#testTransaction
     // cite: frameworks-base SQLiteOpenHelper.java#getDatabaseLocked
     let app_dir = test_app_data_dir("sqlite_transaction_reopen");
     let data_dir = app_dir.join("apps/com.example/data");
@@ -1347,6 +1345,308 @@ fn builtin_context_package_manager_reports_no_features() {
             std::rc::Rc::from("Landroid/content/pm/ActivityInfo;.bootstrap")
         )))
     );
+}
+
+#[test]
+fn builtin_package_manager_get_package_info_returns_certs_and_throws_on_missing() {
+    // cite: frameworks-base ApplicationPackageManager.java#getPackageInfo
+    // cite: frameworks-base PackageManager.java#GET_SIGNATURES, GET_META_DATA
+    let program = DexProgram::new(Vec::new());
+    let artifact = crate::install::InstalledPackageArtifact {
+        version_name: Some("0.3.18".to_owned()),
+        version_code: Some("252432036".to_owned()),
+        package_name: "com.google.android.gms".to_owned(),
+        launch_activity: None,
+        launchable_activities: Vec::new(),
+        split_apks: Vec::new(),
+        shared_user_id: None,
+        signing_certificates: vec!["3082010a".to_owned()],
+        declared_permissions: vec!["android.permission.FAKE_PACKAGE_SIGNATURE".to_owned()],
+        services_json: Vec::new(),
+        receivers_json: Vec::new(),
+        providers_json: Vec::new(),
+        uses_libraries_json: Vec::new(),
+        application_meta_data_json: vec![serde_json::json!({
+            "name": "fake-signature",
+            "value": "deadbeef"
+        })
+        .to_string()],
+        source_apk: PathBuf::from("/tmp/gms.apk"),
+        source_size: 100,
+        source_modified_unix_millis: 1,
+        entry_count: 1,
+        dex_files: Vec::new(),
+        dex_metadata: Vec::new(),
+        resource_table_summary: None,
+        resource_files: Vec::new(),
+        native_abi_names: Vec::new(),
+        selected_guest_abi: None,
+        native_libraries: Vec::new(),
+        android_system_libraries: Vec::new(),
+        missing_native_libraries: Vec::new(),
+    };
+    program.caches.borrow_mut().package_registry = Some(
+        crate::package_registry::PackageRegistry::from_artifacts(vec![artifact], true),
+    );
+
+    let get_package_info = DexMethodId {
+        class_descriptor: "Landroid/content/pm/PackageManager;".to_owned(),
+        name: "getPackageInfo".to_owned(),
+        proto: crate::dex::DexProto {
+            shorty: "LLI".to_owned(),
+            return_type: "Landroid/content/pm/PackageInfo;".to_owned(),
+            parameters: vec!["Ljava/lang/String;".to_owned(), "I".to_owned()],
+        },
+    };
+
+    let missing_call = test_invocation(vec![
+        DexValue::Reference(std::rc::Rc::from(
+            "Landroid/content/pm/PackageManager;.bootstrap",
+        )),
+        DexValue::String(std::rc::Rc::from("com.missing.app")),
+        DexValue::Int(0),
+    ]);
+    let Some(DexExecutionResult::Throw(thrown)) =
+        program.invoke_builtin_method(&get_package_info, Some(&missing_call))
+    else {
+        panic!("missing package should throw NameNotFoundException");
+    };
+    assert_eq!(
+        value_class_descriptor(&thrown),
+        Some("Landroid/content/pm/PackageManager$NameNotFoundException;")
+    );
+
+    let gms_call = test_invocation(vec![
+        DexValue::Reference(std::rc::Rc::from(
+            "Landroid/content/pm/PackageManager;.bootstrap",
+        )),
+        DexValue::String(std::rc::Rc::from("com.google.android.gms")),
+        DexValue::Int(
+            crate::package_registry::GET_SIGNATURES | crate::package_registry::GET_META_DATA,
+        ),
+    ]);
+    let Some(DexExecutionResult::Value(package_info)) =
+        program.invoke_builtin_method(&get_package_info, Some(&gms_call))
+    else {
+        panic!("installed package should return PackageInfo");
+    };
+    let signatures_array = program
+        .read_stored_instance_field(
+            &package_info,
+            &DexFieldId {
+                class_descriptor: "Landroid/content/pm/PackageInfo;".to_owned(),
+                type_descriptor: "[Landroid/content/pm/Signature;".to_owned(),
+                name: "signatures".to_owned(),
+            },
+        )
+        .expect("signatures field should be populated");
+    let sig_entries = program
+        .runtime
+        .borrow()
+        .array_entries
+        .get(&map_identity_key(&signatures_array))
+        .expect("signatures array should exist")
+        .clone();
+    assert_eq!(sig_entries.len(), 1);
+
+    let to_chars = DexMethodId {
+        class_descriptor: "Landroid/content/pm/Signature;".to_owned(),
+        name: "toCharsString".to_owned(),
+        proto: crate::dex::DexProto {
+            shorty: "L".to_owned(),
+            return_type: "Ljava/lang/String;".to_owned(),
+            parameters: Vec::new(),
+        },
+    };
+    assert_eq!(
+        program.invoke_builtin_method(
+            &to_chars,
+            Some(&test_invocation(vec![sig_entries[0].clone()]))
+        ),
+        Some(DexExecutionResult::Value(DexValue::String(
+            std::rc::Rc::from("deadbeef")
+        )))
+    );
+}
+
+#[test]
+fn builtin_package_installer_session_lifecycle_and_get_installed_packages() {
+    // cite: frameworks-base PackageInstaller.java#createSession, openSession, openWrite, commit
+    // cite: frameworks-base ApplicationPackageManager.java#getInstalledPackages
+    let root = std::env::temp_dir().join(format!(
+        "winedroid-pkg-installer-test-{}",
+        std::process::id()
+    ));
+    let data_dir = root.join("apps/com.android.vending/data");
+    let shared_dir = root.join("storage");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&shared_dir).unwrap();
+    let program =
+        DexProgram::with_guest_filesystem(Vec::new(), "com.android.vending", data_dir, shared_dir)
+            .unwrap();
+    let artifact = crate::install::InstalledPackageArtifact {
+        version_name: Some("1.0".to_owned()),
+        version_code: Some("1".to_owned()),
+        package_name: "com.example.installed".to_owned(),
+        launch_activity: None,
+        launchable_activities: Vec::new(),
+        split_apks: Vec::new(),
+        shared_user_id: None,
+        signing_certificates: Vec::new(),
+        declared_permissions: Vec::new(),
+        services_json: Vec::new(),
+        receivers_json: Vec::new(),
+        providers_json: Vec::new(),
+        uses_libraries_json: Vec::new(),
+        application_meta_data_json: Vec::new(),
+        source_apk: PathBuf::from("/tmp/installed.apk"),
+        source_size: 10,
+        source_modified_unix_millis: 1,
+        entry_count: 1,
+        dex_files: Vec::new(),
+        dex_metadata: Vec::new(),
+        resource_table_summary: None,
+        resource_files: Vec::new(),
+        native_abi_names: Vec::new(),
+        selected_guest_abi: None,
+        native_libraries: Vec::new(),
+        android_system_libraries: Vec::new(),
+        missing_native_libraries: Vec::new(),
+    };
+    program.caches.borrow_mut().package_registry = Some(
+        crate::package_registry::PackageRegistry::from_artifacts(vec![artifact], false),
+    );
+
+    let get_installed = DexMethodId {
+        class_descriptor: "Landroid/content/pm/PackageManager;".to_owned(),
+        name: "getInstalledPackages".to_owned(),
+        proto: crate::dex::DexProto {
+            shorty: "LI".to_owned(),
+            return_type: "Ljava/util/List;".to_owned(),
+            parameters: vec!["I".to_owned()],
+        },
+    };
+    let Some(DexExecutionResult::Value(list)) = program.invoke_builtin_method(
+        &get_installed,
+        Some(&test_invocation(vec![
+            DexValue::Reference(std::rc::Rc::from(
+                "Landroid/content/pm/PackageManager;.bootstrap",
+            )),
+            DexValue::Int(0),
+        ])),
+    ) else {
+        panic!("getInstalledPackages should return List");
+    };
+    let entries = program
+        .runtime
+        .borrow()
+        .list_entries
+        .get(&map_identity_key(&list))
+        .expect("list_entries should exist")
+        .clone();
+    assert_eq!(entries.len(), 1);
+
+    let get_installer = DexMethodId {
+        class_descriptor: "Landroid/content/pm/PackageManager;".to_owned(),
+        name: "getPackageInstaller".to_owned(),
+        proto: crate::dex::DexProto {
+            shorty: "L".to_owned(),
+            return_type: "Landroid/content/pm/PackageInstaller;".to_owned(),
+            parameters: Vec::new(),
+        },
+    };
+    let Some(DexExecutionResult::Value(installer)) =
+        program.invoke_builtin_method(&get_installer, None)
+    else {
+        panic!("getPackageInstaller should return PackageInstaller");
+    };
+
+    let create_session = DexMethodId {
+        class_descriptor: "Landroid/content/pm/PackageInstaller;".to_owned(),
+        name: "createSession".to_owned(),
+        proto: crate::dex::DexProto {
+            shorty: "IL".to_owned(),
+            return_type: "I".to_owned(),
+            parameters: vec!["Landroid/content/pm/PackageInstaller$SessionParams;".to_owned()],
+        },
+    };
+    let Some(DexExecutionResult::Int(session_id)) = program.invoke_builtin_method(
+        &create_session,
+        Some(&test_invocation(vec![
+            installer.clone(),
+            DexValue::Reference(std::rc::Rc::from(
+                "Landroid/content/pm/PackageInstaller$SessionParams;.bootstrap",
+            )),
+        ])),
+    ) else {
+        panic!("createSession should return session id");
+    };
+
+    let open_session = DexMethodId {
+        class_descriptor: "Landroid/content/pm/PackageInstaller;".to_owned(),
+        name: "openSession".to_owned(),
+        proto: crate::dex::DexProto {
+            shorty: "LI".to_owned(),
+            return_type: "Landroid/content/pm/PackageInstaller$Session;".to_owned(),
+            parameters: vec!["I".to_owned()],
+        },
+    };
+    let Some(DexExecutionResult::Value(session)) = program.invoke_builtin_method(
+        &open_session,
+        Some(&test_invocation(vec![installer, DexValue::Int(session_id)])),
+    ) else {
+        panic!("openSession should return Session");
+    };
+
+    let open_write = DexMethodId {
+        class_descriptor: "Landroid/content/pm/PackageInstaller$Session;".to_owned(),
+        name: "openWrite".to_owned(),
+        proto: crate::dex::DexProto {
+            shorty: "LLJJ".to_owned(),
+            return_type: "Ljava/io/OutputStream;".to_owned(),
+            parameters: vec![
+                "Ljava/lang/String;".to_owned(),
+                "J".to_owned(),
+                "J".to_owned(),
+            ],
+        },
+    };
+    let Some(DexExecutionResult::Value(stream)) = program.invoke_builtin_method(
+        &open_write,
+        Some(&test_invocation(vec![
+            session.clone(),
+            DexValue::String(std::rc::Rc::from("base.apk")),
+            DexValue::Long(0),
+            DexValue::Long(-1),
+        ])),
+    ) else {
+        panic!("openWrite should return OutputStream");
+    };
+    assert_eq!(
+        value_class_descriptor(&stream),
+        Some("Ljava/io/FileOutputStream;")
+    );
+
+    let commit = DexMethodId {
+        class_descriptor: "Landroid/content/pm/PackageInstaller$Session;".to_owned(),
+        name: "commit".to_owned(),
+        proto: crate::dex::DexProto {
+            shorty: "VL".to_owned(),
+            return_type: "V".to_owned(),
+            parameters: vec!["Landroid/content/IntentSender;".to_owned()],
+        },
+    };
+    let Some(DexExecutionResult::Throw(err)) = program.invoke_builtin_method(
+        &commit,
+        Some(&test_invocation(vec![session, DexValue::Null])),
+    ) else {
+        panic!("committing empty APK should throw");
+    };
+    assert_eq!(
+        value_class_descriptor(&err),
+        Some("Ljava/lang/IllegalArgumentException;")
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

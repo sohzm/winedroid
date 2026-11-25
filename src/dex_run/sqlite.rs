@@ -957,7 +957,7 @@ impl DexProgram {
         if database_name.is_empty() {
             return Err(WinedroidError::new("SQLite database name is empty"));
         }
-        if database_name.contains('/') {
+        if !database_name.starts_with('/') && database_name.contains('/') {
             return Err(WinedroidError::new(format!(
                 "SQLite database name `{database_name}` contains a path separator"
             )));
@@ -966,7 +966,17 @@ impl DexProgram {
         if let Some(filesystem) = &self.guest_filesystem {
             // cite: frameworks-base SQLiteOpenHelper.java#getDatabaseLocked
             // cite: frameworks-base ContextImpl.java#getDatabasePath, getDatabasesDir, getDataDir
-            let directory = filesystem.private_guest_path(storage, "databases");
+            let (directory, guest_path) = if database_name.starts_with('/') {
+                let parent = database_name
+                    .rsplit_once('/')
+                    .map(|(dir, _)| if dir.is_empty() { "/" } else { dir })
+                    .unwrap_or("/");
+                (parent.to_owned(), database_name.to_owned())
+            } else {
+                let directory = filesystem.private_guest_path(storage, "databases");
+                let guest_path = format!("{directory}/{database_name}");
+                (directory, guest_path)
+            };
             filesystem
                 .resolve(
                     &directory,
@@ -977,7 +987,6 @@ impl DexProgram {
                 .map_err(|error| {
                     WinedroidError::with_source("failed to create SQLite database directory", error)
                 })?;
-            let guest_path = format!("{directory}/{database_name}");
             let resolved = filesystem.resolve(
                 &guest_path,
                 crate::external_storage::ExternalStorageAccess::Write,

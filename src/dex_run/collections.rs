@@ -496,7 +496,7 @@ impl DexProgram {
         Ok(i32::from(equal))
     }
 
-    fn runtime_values_equal(
+    pub(super) fn runtime_values_equal(
         &self,
         left: &DexValue,
         right: &DexValue,
@@ -509,6 +509,11 @@ impl DexProgram {
 
         if matches!(left, DexValue::Null) || matches!(right, DexValue::Null) {
             return Ok(false);
+        }
+
+        // cite: libcore String.java#equals
+        if let Some(left_text) = self.string_text(left) {
+            return Ok(self.string_text(right).as_deref() == Some(left_text.as_str()));
         }
 
         if let Some(equal) = self.runtime_map_equals(left, right, depth + 1)? {
@@ -2222,6 +2227,15 @@ impl DexProgram {
     }
 
     fn projected_collection_values(&self, value: &DexValue) -> Option<Vec<DexValue>> {
+        // cite: libcore Collections.java#EMPTY_LIST, EMPTY_SET
+        if let DexValue::Reference(reference) = value {
+            if matches!(
+                reference.as_ref(),
+                "Ljava/util/List;:collections:emptyList" | "Ljava/util/Set;:collections:emptySet"
+            ) {
+                return Some(Vec::new());
+            }
+        }
         let list_key = map_identity_key(value);
         {
             let runtime = self.runtime.borrow();
@@ -3482,7 +3496,7 @@ impl DexProgram {
     }
 
     pub(super) fn initialize_sparse_array(&self, invocation: &DexInvocation) -> Option<()> {
-        if invocation.arguments.len() != 1 {
+        if !matches!(invocation.arguments.len(), 1 | 2) {
             return None;
         }
 

@@ -86,6 +86,7 @@ pub(crate) struct WinedroidConfig {
     ui_mode: WinedroidUiMode,
     frame_rate: WinedroidFrameRate,
     display_size: DisplaySize,
+    signature_spoofing: bool,
 }
 
 impl Default for WinedroidConfig {
@@ -94,6 +95,7 @@ impl Default for WinedroidConfig {
             ui_mode: WinedroidUiMode::System,
             frame_rate: WinedroidFrameRate::Host,
             display_size: DisplaySize::default(),
+            signature_spoofing: false,
         }
     }
 }
@@ -164,6 +166,10 @@ impl WinedroidConfig {
         self.display_size
     }
 
+    pub(crate) fn signature_spoofing(&self) -> bool {
+        self.signature_spoofing
+    }
+
     fn parse(contents: &str) -> Result<Self> {
         let value: Value = serde_json::from_str(contents)
             .map_err(|error| WinedroidError::with_source("config is not valid JSON", error))?;
@@ -172,7 +178,11 @@ impl WinedroidConfig {
         };
 
         for key in object.keys() {
-            if key != "ui_mode" && key != "frame_rate" && key != "display" {
+            if key != "ui_mode"
+                && key != "frame_rate"
+                && key != "display"
+                && key != "signature_spoofing"
+            {
                 return Err(WinedroidError::new(format!(
                     "unsupported config key `{key}`"
                 )));
@@ -194,10 +204,21 @@ impl WinedroidConfig {
             None => DisplaySize::default(),
         };
 
+        let signature_spoofing = match object.get("signature_spoofing") {
+            Some(Value::Bool(enabled)) => *enabled,
+            Some(_) => {
+                return Err(WinedroidError::new(
+                    "signature_spoofing must be a JSON boolean",
+                ));
+            }
+            None => false,
+        };
+
         Ok(Self {
             ui_mode,
             frame_rate,
             display_size,
+            signature_spoofing,
         })
     }
 }
@@ -257,7 +278,7 @@ impl WinedroidUiMode {
 
     fn android_configuration_ui_mode(self) -> i32 {
         match self {
-            // cite: frameworks-base UiModeManagerService.java#updateConfigurationLocked
+            // cite: frameworks-base UiModeManager.java#MODE_NIGHT_NO
             Self::System => UI_MODE_TYPE_NORMAL | UI_MODE_NIGHT_NO,
             Self::Light => UI_MODE_TYPE_NORMAL | UI_MODE_NIGHT_NO,
             Self::Dark => UI_MODE_TYPE_NORMAL | UI_MODE_NIGHT_YES,
@@ -458,6 +479,20 @@ mod tests {
                 "unexpected error for `{invalid}`: {error}"
             );
         }
+    }
+
+    #[test]
+    fn parses_opt_in_signature_spoofing_and_defaults_false() {
+        let default_cfg = WinedroidConfig::parse("{}").expect("empty config should parse");
+        assert!(!default_cfg.signature_spoofing());
+
+        let enabled_cfg = WinedroidConfig::parse("{\"signature_spoofing\":true}")
+            .expect("signature_spoofing boolean should parse");
+        assert!(enabled_cfg.signature_spoofing());
+
+        let err = WinedroidConfig::parse("{\"signature_spoofing\":\"yes\"}")
+            .expect_err("non-boolean signature_spoofing should be rejected");
+        assert!(err.to_string().contains("signature_spoofing"));
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

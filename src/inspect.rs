@@ -19,6 +19,7 @@ pub struct InspectionReport {
     dex_files: Vec<DexFileSummary>,
     native_libraries: Vec<NativeLibrary>,
     resource_table: Option<ResourceTableInspection>,
+    signing_certificates: Vec<Vec<u8>>,
     entry_count: usize,
 }
 
@@ -120,6 +121,10 @@ pub fn inspect_apk(path: &Path) -> Result<InspectionReport> {
         let _span = trace::span("inspect", "inspect native libraries");
         read_native_libraries(&mut apk, &entries)?
     };
+    let signing_certificates = {
+        let _span = trace::span("inspect", "inspect APK signatures");
+        crate::apk_signature::extract_signing_certificates(path)?
+    };
 
     Ok(InspectionReport {
         path: path.to_owned(),
@@ -127,6 +132,7 @@ pub fn inspect_apk(path: &Path) -> Result<InspectionReport> {
         dex_files,
         native_libraries,
         resource_table,
+        signing_certificates,
         entry_count: entries.len(),
     })
 }
@@ -346,6 +352,26 @@ impl fmt::Display for InspectionReport {
             "  effectiveDirectBootAware: {}",
             self.manifest.is_direct_boot_aware(false)
         )?;
+        write_optional(
+            formatter,
+            "sharedUserId",
+            self.manifest.shared_user_id.as_deref(),
+        )?;
+        write_optional(formatter, "split", self.manifest.split_name.as_deref())?;
+        writeln!(formatter)?;
+
+        writeln!(formatter, "Signing certificates")?;
+        if self.signing_certificates.is_empty() {
+            writeln!(formatter, "  none (unsigned)")?;
+        } else {
+            for cert in &self.signing_certificates {
+                writeln!(
+                    formatter,
+                    "  SHA-256: {}",
+                    crate::apk_signature::sha256_fingerprint_colon_hex(cert)
+                )?;
+            }
+        }
         writeln!(formatter)?;
 
         writeln!(formatter, "Launchable activities")?;
@@ -362,6 +388,16 @@ impl fmt::Display for InspectionReport {
 
         writeln!(formatter, "Launch activity classes")?;
         write_launch_activity_classes(formatter, &launch_classes, &self.dex_files)?;
+        writeln!(formatter)?;
+
+        writeln!(
+            formatter,
+            "Components: {} services, {} receivers, {} providers, {} uses-library",
+            self.manifest.services.len(),
+            self.manifest.receivers.len(),
+            self.manifest.providers.len(),
+            self.manifest.uses_libraries.len()
+        )?;
         writeln!(formatter)?;
 
         writeln!(formatter, "Permissions")?;
@@ -426,8 +462,32 @@ impl InspectionReport {
         self.manifest.package_name.as_deref()
     }
 
+    pub fn manifest(&self) -> &AndroidManifest {
+        &self.manifest
+    }
+
+    pub fn signing_certificates(&self) -> &[Vec<u8>] {
+        &self.signing_certificates
+    }
+
     pub fn launchable_activities(&self) -> Vec<String> {
         self.manifest.launchable_activities()
+    }
+
+    pub fn resolved_launch_activities(&self) -> Result<Vec<String>> {
+        self.launchable_activities()
+            .into_iter()
+            .map(|component| self.resolve_launch_component(&component))
+            .collect()
+    }
+
+    pub fn primary_launch_activity(&self) -> Result<Option<String>> {
+        let activities = self.launchable_activities();
+        if activities.len() == 1 {
+            self.resolve_launch_component(&activities[0]).map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn single_launch_activity(&self) -> Result<String> {
@@ -562,6 +622,7 @@ impl InspectionReport {
             dex_files: Vec::new(),
             native_libraries: Vec::new(),
             resource_table: None,
+            signing_certificates: Vec::new(),
             entry_count: 0,
         }
     }
@@ -860,7 +921,7 @@ mod tests {
     #[test]
     fn formats_effective_sdk_legacy_storage_and_permission_constraints() {
         // cite: frameworks-base PackageParser.java#DEFAULT_MIN_SDK_VERSION, DEFAULT_TARGET_SDK_VERSION, parseBaseApkCommon, parseBaseApplication, parseUsesPermission
-        // cite: frameworks-base ScanPackageUtils.java#applyPolicy
+        // cite: frameworks-base ApplicationInfo.java#PRIVATE_FLAG_DEFAULT_TO_DEVICE_PROTECTED_STORAGE, PRIVATE_FLAG_DIRECT_BOOT_AWARE
         let report = InspectionReport::for_test(AndroidManifest {
             min_sdk_version: Some("28".to_owned()),
             uses_sdk_declared: true,

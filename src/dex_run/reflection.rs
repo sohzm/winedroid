@@ -650,6 +650,19 @@ impl DexProgram {
             );
         }
 
+        // cite: libcore Unsafe.java#theUnsafe
+        if descriptor == "Lsun/misc/Unsafe;" {
+            let field = DexFieldId {
+                class_descriptor: "Lsun/misc/Unsafe;".to_owned(),
+                type_descriptor: "Lsun/misc/Unsafe;".to_owned(),
+                name: "theUnsafe".to_owned(),
+            };
+            return Some(self.allocate_filled_array(
+                "[Ljava/lang/reflect/Field;".to_owned(),
+                vec![reflect_dex_field_value(&field, DEX_ACC_STATIC)],
+            ));
+        }
+
         Some(self.allocate_filled_array("[Ljava/lang/reflect/Field;".to_owned(), Vec::new()))
     }
 
@@ -1347,6 +1360,8 @@ impl DexProgram {
     }
 }
 
+// cite: libcore Class.java#getName
+// cite: art class.cc#ComputeName
 pub(super) fn class_get_name(invocation: &DexInvocation) -> Option<String> {
     if invocation.arguments.len() != 1 {
         return None;
@@ -1354,7 +1369,7 @@ pub(super) fn class_get_name(invocation: &DexInvocation) -> Option<String> {
 
     let descriptor = class_reference_descriptor(invocation)?;
 
-    descriptor_to_java_name(descriptor)
+    class_display_name(descriptor)
 }
 
 fn class_display_name(descriptor: &str) -> Option<String> {
@@ -1637,6 +1652,37 @@ impl DexProgram {
         box_reflected_field_value(&field.field, value)
     }
 
+    // cite: libcore Field.java#set
+    pub(super) fn reflect_field_set(&self, invocation: &DexInvocation) -> Option<()> {
+        if invocation.arguments.len() != 3 {
+            return None;
+        }
+
+        let field = reflect_field_reference(&invocation.arguments[0])?;
+        let unboxed = unbox_reflected_field_value(&field.field, &invocation.arguments[2])?;
+        let is_static = field
+            .access_flags
+            .is_some_and(|flags| flags & DEX_ACC_STATIC != 0);
+
+        if is_static {
+            self.write_stored_static_field(&field.field, unboxed);
+            return Some(());
+        }
+
+        match &invocation.arguments[1] {
+            DexValue::Object(_) | DexValue::Reference(_) => {}
+            DexValue::Uninitialized
+            | DexValue::Null
+            | DexValue::Int(_)
+            | DexValue::Long(_)
+            | DexValue::Float(_)
+            | DexValue::String(_) => return None,
+        }
+
+        self.write_stored_instance_field(&invocation.arguments[1], &field.field, unboxed)
+            .then_some(())
+    }
+
     pub(super) fn reflect_field_read_value(
         &self,
         field: &ReflectFieldReference,
@@ -1720,6 +1766,22 @@ impl DexProgram {
             return None;
         }
 
+        let expected = atomic_reference_value(&invocation.arguments[4])?;
+        let next = atomic_reference_value(&invocation.arguments[5])?;
+
+        // cite: libcore Unsafe.java#compareAndSwapObject
+        if let Some(index) = unsafe_object_array_index(target, offset) {
+            let array_key = map_identity_key(target);
+            let mut runtime = self.runtime.borrow_mut();
+            let entries = runtime.array_entries.get_mut(&array_key)?;
+            let slot = entries.get_mut(index)?;
+            if *slot != expected {
+                return Some(0);
+            }
+            *slot = next;
+            return Some(1);
+        }
+
         let field = self
             .runtime
             .borrow()
@@ -1730,8 +1792,6 @@ impl DexProgram {
             return None;
         }
 
-        let expected = atomic_reference_value(&invocation.arguments[4])?;
-        let next = atomic_reference_value(&invocation.arguments[5])?;
         let current = self
             .read_stored_instance_field(target, &field)
             .or_else(|| self.read_bootstrap_instance_field(target, &field))
@@ -1743,6 +1803,225 @@ impl DexProgram {
 
         self.write_stored_instance_field(target, &field, next)
             .then_some(1)
+    }
+
+    // cite: libcore Unsafe.java#compareAndSwapInt
+    pub(super) fn unsafe_compare_and_swap_int(&self, invocation: &DexInvocation) -> Option<i32> {
+        if invocation.arguments.len() != 6 {
+            return None;
+        }
+
+        match &invocation.arguments[0] {
+            DexValue::Object(_) | DexValue::Reference(_) => {}
+            _ => return None,
+        }
+
+        let target = &invocation.arguments[1];
+        let DexValue::Long(offset) = invocation.arguments[2] else {
+            return None;
+        };
+        let DexValue::Long(high_slot_offset) = invocation.arguments[3] else {
+            return None;
+        };
+        if offset != high_slot_offset {
+            return None;
+        }
+        let DexValue::Int(expected) = invocation.arguments[4] else {
+            return None;
+        };
+        let DexValue::Int(next) = invocation.arguments[5] else {
+            return None;
+        };
+
+        let field = self
+            .runtime
+            .borrow()
+            .unsafe_field_offsets
+            .get(&offset)?
+            .clone();
+        let current = match self
+            .read_stored_instance_field(target, &field)
+            .or_else(|| self.read_bootstrap_instance_field(target, &field))
+            .or_else(|| default_field_value(&field))?
+        {
+            DexValue::Int(value) => value,
+            _ => return None,
+        };
+
+        if current != expected {
+            return Some(0);
+        }
+
+        self.write_stored_instance_field(target, &field, DexValue::Int(next))
+            .then_some(1)
+    }
+
+    // cite: libcore Unsafe.java#compareAndSwapLong
+    pub(super) fn unsafe_compare_and_swap_long(&self, invocation: &DexInvocation) -> Option<i32> {
+        if invocation.arguments.len() != 8 {
+            return None;
+        }
+
+        match &invocation.arguments[0] {
+            DexValue::Object(_) | DexValue::Reference(_) => {}
+            _ => return None,
+        }
+
+        let target = &invocation.arguments[1];
+        let DexValue::Long(offset) = invocation.arguments[2] else {
+            return None;
+        };
+        let DexValue::Long(high_slot_offset) = invocation.arguments[3] else {
+            return None;
+        };
+        if offset != high_slot_offset {
+            return None;
+        }
+        let DexValue::Long(expected) = invocation.arguments[4] else {
+            return None;
+        };
+        let DexValue::Long(next) = invocation.arguments[6] else {
+            return None;
+        };
+
+        let field = self
+            .runtime
+            .borrow()
+            .unsafe_field_offsets
+            .get(&offset)?
+            .clone();
+        let current = match self
+            .read_stored_instance_field(target, &field)
+            .or_else(|| self.read_bootstrap_instance_field(target, &field))
+            .or_else(|| default_field_value(&field))?
+        {
+            DexValue::Long(value) => value,
+            _ => return None,
+        };
+
+        if current != expected {
+            return Some(0);
+        }
+
+        self.write_stored_instance_field(target, &field, DexValue::Long(next))
+            .then_some(1)
+    }
+
+    // cite: libcore Unsafe.java#arrayBaseOffset
+    pub(super) fn unsafe_array_base_offset(&self, invocation: &DexInvocation) -> Option<i32> {
+        if invocation.arguments.len() != 2 {
+            return None;
+        }
+        Some(16)
+    }
+
+    // cite: libcore Unsafe.java#arrayIndexScale
+    pub(super) fn unsafe_array_index_scale(&self, invocation: &DexInvocation) -> Option<i32> {
+        if invocation.arguments.len() != 2 {
+            return None;
+        }
+        let descriptor = class_reference_descriptor_from_value(&invocation.arguments[1]);
+        let scale = match descriptor {
+            Some("[B") | Some("[Z") => 1,
+            Some("[C") | Some("[S") => 2,
+            Some("[J") | Some("[D") => 8,
+            _ => 4,
+        };
+        Some(scale)
+    }
+
+    // cite: libcore Unsafe.java#putLong
+    pub(super) fn unsafe_put_long(&self, invocation: &DexInvocation) -> Option<()> {
+        if invocation.arguments.len() != 6 {
+            return None;
+        }
+        let target = &invocation.arguments[1];
+        let DexValue::Long(offset) = invocation.arguments[2] else {
+            return None;
+        };
+        let DexValue::Long(value) = invocation.arguments[4] else {
+            return None;
+        };
+        let field = self
+            .runtime
+            .borrow()
+            .unsafe_field_offsets
+            .get(&offset)?
+            .clone();
+        self.write_stored_instance_field(target, &field, DexValue::Long(value))
+            .then_some(())
+    }
+
+    // cite: libcore Unsafe.java#getLong
+    pub(super) fn unsafe_get_long(&self, invocation: &DexInvocation) -> Option<i64> {
+        if invocation.arguments.len() != 4 {
+            return None;
+        }
+        let target = &invocation.arguments[1];
+        let DexValue::Long(offset) = invocation.arguments[2] else {
+            return None;
+        };
+        let field = self
+            .runtime
+            .borrow()
+            .unsafe_field_offsets
+            .get(&offset)?
+            .clone();
+        match self
+            .read_stored_instance_field(target, &field)
+            .or_else(|| self.read_bootstrap_instance_field(target, &field))
+            .or_else(|| default_field_value(&field))?
+        {
+            DexValue::Long(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    // cite: libcore Unsafe.java#putInt
+    pub(super) fn unsafe_put_int(&self, invocation: &DexInvocation) -> Option<()> {
+        if invocation.arguments.len() != 5 {
+            return None;
+        }
+        let target = &invocation.arguments[1];
+        let DexValue::Long(offset) = invocation.arguments[2] else {
+            return None;
+        };
+        let DexValue::Int(value) = invocation.arguments[4] else {
+            return None;
+        };
+        let field = self
+            .runtime
+            .borrow()
+            .unsafe_field_offsets
+            .get(&offset)?
+            .clone();
+        self.write_stored_instance_field(target, &field, DexValue::Int(value))
+            .then_some(())
+    }
+
+    // cite: libcore Unsafe.java#getInt
+    pub(super) fn unsafe_get_int(&self, invocation: &DexInvocation) -> Option<i32> {
+        if invocation.arguments.len() != 4 {
+            return None;
+        }
+        let target = &invocation.arguments[1];
+        let DexValue::Long(offset) = invocation.arguments[2] else {
+            return None;
+        };
+        let field = self
+            .runtime
+            .borrow()
+            .unsafe_field_offsets
+            .get(&offset)?
+            .clone();
+        match self
+            .read_stored_instance_field(target, &field)
+            .or_else(|| self.read_bootstrap_instance_field(target, &field))
+            .or_else(|| default_field_value(&field))?
+        {
+            DexValue::Int(value) => Some(value),
+            _ => None,
+        }
     }
 
     pub(super) fn unsafe_put_object_volatile(&self, invocation: &DexInvocation) -> Option<()> {
@@ -1771,6 +2050,18 @@ impl DexProgram {
             return None;
         }
 
+        let value = atomic_reference_value(&invocation.arguments[4])?;
+
+        // cite: libcore Unsafe.java#putObjectVolatile
+        if let Some(index) = unsafe_object_array_index(target, offset) {
+            let array_key = map_identity_key(target);
+            let mut runtime = self.runtime.borrow_mut();
+            let entries = runtime.array_entries.get_mut(&array_key)?;
+            let slot = entries.get_mut(index)?;
+            *slot = value;
+            return Some(());
+        }
+
         let field = self
             .runtime
             .borrow()
@@ -1780,8 +2071,6 @@ impl DexProgram {
         if !field.type_descriptor.starts_with('L') && !field.type_descriptor.starts_with('[') {
             return None;
         }
-
-        let value = atomic_reference_value(&invocation.arguments[4])?;
 
         self.write_stored_instance_field(target, &field, value)
             .then_some(())
@@ -1814,6 +2103,14 @@ impl DexProgram {
         };
         if offset != high_slot_offset {
             return None;
+        }
+
+        // cite: libcore Unsafe.java#getObjectVolatile
+        if let Some(index) = unsafe_object_array_index(target, offset) {
+            let array_key = map_identity_key(target);
+            let runtime = self.runtime.borrow();
+            let entries = runtime.array_entries.get(&array_key)?;
+            return entries.get(index).cloned();
         }
 
         let field = self
@@ -1938,6 +2235,81 @@ pub(super) fn box_reflected_field_value(field: &DexFieldId, value: DexValue) -> 
                 None
             }
         },
+    }
+}
+
+// cite: libcore Field.java#set
+pub(super) fn unbox_reflected_field_value(
+    field: &DexFieldId,
+    value: &DexValue,
+) -> Option<DexValue> {
+    match field.type_descriptor.as_str() {
+        "Z" => match value {
+            DexValue::Int(v) => Some(DexValue::Int(if *v == 0 { 0 } else { 1 })),
+            DexValue::Reference(r) => match r.as_ref() {
+                "Ljava/lang/Boolean;:true" => Some(DexValue::Int(1)),
+                "Ljava/lang/Boolean;:false" => Some(DexValue::Int(0)),
+                _ => None,
+            },
+            _ => None,
+        },
+        "B" => match value {
+            DexValue::Int(v) => Some(DexValue::Int(*v)),
+            DexValue::Reference(r) => r
+                .strip_prefix("Ljava/lang/Byte;:")
+                .and_then(|s| s.parse::<i32>().ok())
+                .map(DexValue::Int),
+            _ => None,
+        },
+        "C" => match value {
+            DexValue::Int(v) => Some(DexValue::Int(*v)),
+            DexValue::Reference(r) => r
+                .strip_prefix("Ljava/lang/Character;:")
+                .and_then(|s| s.parse::<i32>().ok())
+                .map(DexValue::Int),
+            _ => None,
+        },
+        "S" => match value {
+            DexValue::Int(v) => Some(DexValue::Int(*v)),
+            DexValue::Reference(r) => r
+                .strip_prefix("Ljava/lang/Short;:")
+                .and_then(|s| s.parse::<i32>().ok())
+                .map(DexValue::Int),
+            _ => None,
+        },
+        "I" => match value {
+            DexValue::Int(v) => Some(DexValue::Int(*v)),
+            DexValue::Reference(r) => r
+                .strip_prefix("Ljava/lang/Integer;:")
+                .and_then(|s| s.parse::<i32>().ok())
+                .map(DexValue::Int),
+            _ => None,
+        },
+        "J" => match value {
+            DexValue::Long(v) => Some(DexValue::Long(*v)),
+            DexValue::Reference(r) => r
+                .strip_prefix("Ljava/lang/Long;:")
+                .and_then(|s| s.parse::<i64>().ok())
+                .map(DexValue::Long),
+            _ => None,
+        },
+        "F" => match value {
+            DexValue::Float(v) => Some(DexValue::Float(*v)),
+            DexValue::Reference(r) => r
+                .strip_prefix("Ljava/lang/Float;:")
+                .and_then(|s| u32::from_str_radix(s, 16).ok())
+                .map(|bits| DexValue::Float(f32::from_bits(bits))),
+            _ => None,
+        },
+        "D" => match value {
+            DexValue::Long(v) => Some(DexValue::Long(*v)),
+            DexValue::Reference(r) => r
+                .strip_prefix("Ljava/lang/Double;:")
+                .and_then(|s| u64::from_str_radix(s, 16).ok())
+                .map(|bits| DexValue::Long(bits as i64)),
+            _ => None,
+        },
+        _ => Some(value.clone()),
     }
 }
 
@@ -2167,4 +2539,17 @@ pub(super) fn object_hash_code(invocation: &DexInvocation) -> Option<i32> {
     }
 
     Some(stable_hash_i32(&map_identity_key(&invocation.arguments[0])))
+}
+
+// cite: libcore Unsafe.java#arrayBaseOffset, arrayIndexScale
+fn unsafe_object_array_index(target: &DexValue, offset: i64) -> Option<usize> {
+    let descriptor = value_class_descriptor(target)?;
+    if !descriptor.starts_with('[') || offset < 16 {
+        return None;
+    }
+    let rel = offset - 16;
+    if rel % 4 != 0 {
+        return None;
+    }
+    usize::try_from(rel / 4).ok()
 }

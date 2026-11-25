@@ -278,6 +278,25 @@ impl DexProgram {
             return self.class_cast(invocation);
         }
 
+        // cite: libcore Class.java#asSubclass
+        if method.class_descriptor == "Ljava/lang/Class;"
+            && method.name == "asSubclass"
+            && method
+                .proto
+                .descriptor_is("(Ljava/lang/Class;)Ljava/lang/Class;")
+        {
+            let invocation = invocation?;
+            let receiver = invocation.arguments.first()?;
+            let target = invocation.arguments.get(1)?;
+            let self_desc = class_reference_descriptor_from_value(receiver)?;
+            let target_desc = class_reference_descriptor_from_value(target)?;
+            if self.descriptor_matches_type(self_desc, target_desc) {
+                return Some(DexExecutionResult::Value(receiver.clone()));
+            }
+            let exception = self.allocate_object("Ljava/lang/ClassCastException;".to_owned());
+            return Some(DexExecutionResult::Throw(exception));
+        }
+
         if method.class_descriptor == "Ljava/lang/Class;"
             && method.name == "getModifiers"
             && method.proto.descriptor_is("()I")
@@ -444,6 +463,19 @@ impl DexProgram {
             let value = self.reflect_field_get(invocation)?;
 
             return Some(DexExecutionResult::Value(value));
+        }
+
+        // cite: libcore Field.java#set
+        if method.class_descriptor == "Ljava/lang/reflect/Field;"
+            && method.name == "set"
+            && method
+                .proto
+                .descriptor_is("(Ljava/lang/Object;Ljava/lang/Object;)V")
+        {
+            let invocation = invocation?;
+            self.reflect_field_set(invocation)?;
+
+            return Some(DexExecutionResult::Void);
         }
 
         if method.class_descriptor == "Ljava/lang/reflect/Field;"
@@ -636,6 +668,109 @@ impl DexProgram {
             return Some(DexExecutionResult::Value(DexValue::Long(value)));
         }
 
+        // cite: libcore ServiceLoader.java#load, iterator
+        if method.class_descriptor == "Ljava/util/ServiceLoader;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("load", "(Ljava/lang/Class;)Ljava/util/ServiceLoader;")
+                | ("load", "(Ljava/lang/Class;Ljava/lang/ClassLoader;)Ljava/util/ServiceLoader;") =>
+                {
+                    let invocation = invocation?;
+                    let service_class = invocation.arguments.first()?;
+                    let service_name = match service_class {
+                        DexValue::Reference(reference) => reference
+                            .strip_prefix("Ljava/lang/Class;:")
+                            .and_then(descriptor_to_java_name)
+                            .unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    let loader = self.allocate_object("Ljava/util/ServiceLoader;".to_owned());
+                    self.write_stored_instance_field(
+                        &loader,
+                        &service_loader_service_field(),
+                        DexValue::String(std::rc::Rc::from(service_name)),
+                    );
+                    return Some(DexExecutionResult::Value(loader));
+                }
+                ("iterator", "()Ljava/util/Iterator;") => {
+                    let invocation = invocation?;
+                    let receiver = invocation.arguments.first()?;
+                    let service_name = match self
+                        .read_stored_instance_field(receiver, &service_loader_service_field())
+                    {
+                        Some(DexValue::String(name)) => name.to_string(),
+                        _ => String::new(),
+                    };
+                    let providers = self.load_service_providers(&service_name);
+                    let mut runtime = self.runtime.borrow_mut();
+                    let iterator_key = format!("iterator:{}", runtime.next_object_id);
+                    runtime.next_object_id += 1;
+                    runtime
+                        .iterator_entries
+                        .insert(iterator_key.clone(), providers);
+                    runtime.iterator_positions.insert(iterator_key.clone(), 0);
+                    return Some(DexExecutionResult::Value(DexValue::Reference(
+                        std::rc::Rc::from(format!("Ljava/util/Iterator;:{iterator_key}")),
+                    )));
+                }
+                _ => {}
+            }
+        }
+
         None
+    }
+
+    fn load_service_providers(&self, service_name: &str) -> Vec<DexValue> {
+        let mut providers = Vec::new();
+        if service_name.is_empty() {
+            return providers;
+        }
+        let Some(apk_path) = self.apk_path.as_ref() else {
+            return providers;
+        };
+        let Ok(mut apk) = ApkArchive::open(apk_path) else {
+            return providers;
+        };
+        let entry_path = format!("META-INF/services/{service_name}");
+        let Ok(Some(bytes)) = apk.read_optional_file(&entry_path) else {
+            return providers;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        for raw_line in text.lines() {
+            let line = raw_line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let descriptor = format!("L{};", line.replace('.', "/"));
+            let instance = self.allocate_object(descriptor.clone());
+            let init_method = DexMethodId {
+                class_descriptor: descriptor.clone(),
+                name: "<init>".to_owned(),
+                proto: crate::dex::DexProto {
+                    shorty: "V".to_owned(),
+                    return_type: "V".to_owned(),
+                    parameters: Vec::new(),
+                },
+            };
+            if let Ok(Some(constructor)) = self.resolve_exact_method(&init_method) {
+                let _ = self.ensure_class_initialized(&descriptor, 1);
+                if let Ok(DexExecutionResult::Void) = self.execute_method(
+                    None,
+                    &constructor,
+                    Some(std::slice::from_ref(&instance)),
+                    1,
+                ) {
+                    providers.push(instance);
+                }
+            }
+        }
+        providers
+    }
+}
+
+fn service_loader_service_field() -> DexFieldId {
+    DexFieldId {
+        class_descriptor: "Ljava/util/ServiceLoader;".to_owned(),
+        type_descriptor: "Ljava/lang/String;".to_owned(),
+        name: "service".to_owned(),
     }
 }

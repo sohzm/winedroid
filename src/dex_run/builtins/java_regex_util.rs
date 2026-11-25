@@ -92,6 +92,26 @@ impl DexProgram {
             return Some(DexExecutionResult::Value(value));
         }
 
+        // cite: libcore Pattern.java#pattern
+        if method.matches_builtin_signature(
+            "Ljava/util/regex/Pattern;",
+            "pattern",
+            "()Ljava/lang/String;",
+        ) {
+            let invocation = invocation?;
+            let key = map_identity_key(invocation.arguments.first()?);
+            let pattern = self
+                .runtime
+                .borrow()
+                .regex_patterns
+                .get(&key)
+                .cloned()
+                .unwrap_or_default();
+            return Some(DexExecutionResult::Value(DexValue::String(
+                std::rc::Rc::from(pattern),
+            )));
+        }
+
         if method.matches_builtin_signature("Ljava/util/regex/Matcher;", "find", "()Z") {
             let invocation = invocation?;
             let value = self.regex_matcher_find(invocation)?;
@@ -237,6 +257,170 @@ impl DexProgram {
             return Some(DexExecutionResult::Int(value));
         }
 
+        // cite: libcore Logger.java#getLogger, setUseParentHandlers, setLevel, getLevel, addHandler, isLoggable, log, warning, info, fine, finer, finest
+        if method.class_descriptor == "Ljava/util/logging/Logger;" {
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("getLogger", "(Ljava/lang/String;)Ljava/util/logging/Logger;")
+                | (
+                    "getLogger",
+                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/util/logging/Logger;",
+                ) => {
+                    let logger = self.allocate_object("Ljava/util/logging/Logger;".to_owned());
+                    return Some(DexExecutionResult::Value(logger));
+                }
+                ("setUseParentHandlers", "(Z)V")
+                | ("setLevel", "(Ljava/util/logging/Level;)V")
+                | ("addHandler", "(Ljava/util/logging/Handler;)V")
+                | ("log", "(Ljava/util/logging/LogRecord;)V")
+                | ("log", "(Ljava/util/logging/Level;Ljava/lang/String;)V")
+                | ("log", "(Ljava/util/logging/Level;Ljava/lang/String;Ljava/lang/Throwable;)V")
+                | ("log", "(Ljava/util/logging/Level;Ljava/lang/String;Ljava/lang/Object;)V")
+                | ("log", "(Ljava/util/logging/Level;Ljava/lang/String;[Ljava/lang/Object;)V")
+                | ("warning", "(Ljava/lang/String;)V")
+                | ("info", "(Ljava/lang/String;)V")
+                | ("fine", "(Ljava/lang/String;)V")
+                | ("finer", "(Ljava/lang/String;)V")
+                | ("finest", "(Ljava/lang/String;)V") => {
+                    return Some(DexExecutionResult::Void);
+                }
+                ("isLoggable", "(Ljava/util/logging/Level;)Z") => {
+                    return Some(DexExecutionResult::Int(0));
+                }
+                ("getLevel", "()Ljava/util/logging/Level;") => {
+                    return Some(DexExecutionResult::Value(DexValue::Null));
+                }
+                _ => {}
+            }
+        }
+
+        // cite: libcore Handler.java#Handler
+        if method.matches_builtin_signature("Ljava/util/logging/Handler;", "<init>", "()V") {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: libcore Level.java#intValue
+        if method.matches_builtin_signature("Ljava/util/logging/Level;", "intValue", "()I") {
+            return Some(DexExecutionResult::Int(800));
+        }
+
+        // cite: libcore BitSet.java#BitSet, set, clear, get, cardinality, isEmpty, length, nextSetBit
+        if method.class_descriptor == "Ljava/util/BitSet;" {
+            let invocation = invocation?;
+            let receiver = invocation.arguments.first()?;
+            match (method.name.as_str(), method.proto.descriptor().as_str()) {
+                ("<init>", "()V") | ("<init>", "(I)V") => {
+                    self.write_bit_set(receiver, &std::collections::BTreeSet::new());
+                    return Some(DexExecutionResult::Void);
+                }
+                ("set", "(I)V") => {
+                    let DexValue::Int(index) = invocation.arguments.get(1)? else {
+                        return None;
+                    };
+                    if *index >= 0 {
+                        let mut bits = self.read_bit_set(receiver);
+                        bits.insert(*index);
+                        self.write_bit_set(receiver, &bits);
+                    }
+                    return Some(DexExecutionResult::Void);
+                }
+                ("set", "(IZ)V") => {
+                    let DexValue::Int(index) = invocation.arguments.get(1)? else {
+                        return None;
+                    };
+                    let DexValue::Int(value) = invocation.arguments.get(2)? else {
+                        return None;
+                    };
+                    if *index >= 0 {
+                        let mut bits = self.read_bit_set(receiver);
+                        if *value != 0 {
+                            bits.insert(*index);
+                        } else {
+                            bits.remove(index);
+                        }
+                        self.write_bit_set(receiver, &bits);
+                    }
+                    return Some(DexExecutionResult::Void);
+                }
+                ("clear", "(I)V") => {
+                    let DexValue::Int(index) = invocation.arguments.get(1)? else {
+                        return None;
+                    };
+                    let mut bits = self.read_bit_set(receiver);
+                    bits.remove(index);
+                    self.write_bit_set(receiver, &bits);
+                    return Some(DexExecutionResult::Void);
+                }
+                ("clear", "()V") => {
+                    self.write_bit_set(receiver, &std::collections::BTreeSet::new());
+                    return Some(DexExecutionResult::Void);
+                }
+                ("get", "(I)Z") => {
+                    let DexValue::Int(index) = invocation.arguments.get(1)? else {
+                        return None;
+                    };
+                    let bits = self.read_bit_set(receiver);
+                    return Some(DexExecutionResult::Int(i32::from(bits.contains(index))));
+                }
+                ("cardinality", "()I") => {
+                    let bits = self.read_bit_set(receiver);
+                    return Some(DexExecutionResult::Int(bits.len() as i32));
+                }
+                ("isEmpty", "()Z") => {
+                    let bits = self.read_bit_set(receiver);
+                    return Some(DexExecutionResult::Int(i32::from(bits.is_empty())));
+                }
+                ("length", "()I") => {
+                    let bits = self.read_bit_set(receiver);
+                    let len = bits.iter().next_back().map_or(0, |max| max + 1);
+                    return Some(DexExecutionResult::Int(len));
+                }
+                ("nextSetBit", "(I)I") => {
+                    let DexValue::Int(from) = invocation.arguments.get(1)? else {
+                        return None;
+                    };
+                    let bits = self.read_bit_set(receiver);
+                    let next = bits.range(*from..).next().copied().unwrap_or(-1);
+                    return Some(DexExecutionResult::Int(next));
+                }
+                _ => {}
+            }
+        }
+
         None
+    }
+
+    fn read_bit_set(&self, receiver: &DexValue) -> std::collections::BTreeSet<i32> {
+        let mut bits = std::collections::BTreeSet::new();
+        if let Some(DexValue::String(encoded)) =
+            self.read_stored_instance_field(receiver, &bit_set_words_field())
+        {
+            for token in encoded.split_whitespace() {
+                if let Ok(index) = token.parse::<i32>() {
+                    bits.insert(index);
+                }
+            }
+        }
+        bits
+    }
+
+    fn write_bit_set(&self, receiver: &DexValue, bits: &std::collections::BTreeSet<i32>) {
+        let encoded = bits
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.write_stored_instance_field(
+            receiver,
+            &bit_set_words_field(),
+            DexValue::String(std::rc::Rc::from(encoded)),
+        );
+    }
+}
+
+fn bit_set_words_field() -> DexFieldId {
+    DexFieldId {
+        class_descriptor: "Ljava/util/BitSet;".to_owned(),
+        type_descriptor: "Ljava/lang/String;".to_owned(),
+        name: "words".to_owned(),
     }
 }

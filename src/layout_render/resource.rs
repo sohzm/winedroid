@@ -1116,6 +1116,29 @@ fn resolve_layout_color_resource_inner(
     }
 }
 
+// cite: frameworks-base ColorStateList.java#inflate
+fn resolve_layout_color_resource_opt_inner(
+    resources: &[u8],
+    theme: Option<&LayoutTheme>,
+    cache: &mut LayoutResolutionCache,
+    resource_id: u32,
+) -> Result<Option<u32>> {
+    let config = theme.map(|theme| theme.config).unwrap_or_default();
+    match resolve_layout_color_resource_primitive(resources, resource_id, config)? {
+        resource_table::ResourcePrimitive::Color(value)
+        | resource_table::ResourcePrimitive::Hex(value) => Ok(Some(value)),
+        resource_table::ResourcePrimitive::Integer(value) => Ok(Some(value as u32)),
+        resource_table::ResourcePrimitive::Attribute(attribute_id) => {
+            resolve_layout_theme_color_attribute_cached(resources, theme, cache, attribute_id)
+                .map(Some)
+        }
+        resource_table::ResourcePrimitive::String(path) if path.ends_with(".xml") => Ok(None),
+        value => Err(WinedroidError::new(format!(
+            "layout color resource 0x{resource_id:08x} has unsupported value {value:?}"
+        ))),
+    }
+}
+
 pub(crate) fn resolve_layout_resource_value(
     resources: &[u8],
     theme: Option<&LayoutTheme>,
@@ -1411,6 +1434,20 @@ pub(crate) fn resolve_style_color_attribute_cached(
         return Ok(None);
     }
 
+    // cite: frameworks-base ResourceTypes.h#TYPE_NULL, DATA_NULL_EMPTY
+    if matches!(
+        &value,
+        resource_table::ResourcePrimitive::Unknown { data_type: 0, .. }
+    ) {
+        return Ok(None);
+    }
+    if let resource_table::ResourcePrimitive::Reference(resource_id) = value {
+        return resolve_layout_color_resource_opt_inner(resources, Some(theme), cache, resource_id);
+    }
+    if matches!(&value, resource_table::ResourcePrimitive::String(path) if path.ends_with(".xml")) {
+        return Ok(None);
+    }
+
     resolve_layout_color_primitive_cached(resources, theme, cache, attribute_id, value, 0).map(Some)
 }
 
@@ -1512,7 +1549,7 @@ pub(crate) fn resolve_xml_color_value_cached(
         XmlValue::Color(value) | XmlValue::Hex(value) => Ok(Some(*value)),
         XmlValue::Integer(value) => Ok(Some(*value as u32)),
         XmlValue::Reference(resource_id) => {
-            resolve_layout_color_resource_cached(resources, theme, cache, *resource_id).map(Some)
+            resolve_layout_color_resource_opt_inner(resources, theme, cache, *resource_id)
         }
         XmlValue::AttributeReference(attribute_id) => {
             resolve_layout_theme_color_attribute_cached(resources, theme, cache, *attribute_id)

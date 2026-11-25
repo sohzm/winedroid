@@ -1375,9 +1375,8 @@ fn decode_mutf8_string(data: &[u8], expected_utf16_size: u32) -> Result<String> 
         )));
     }
 
-    String::from_utf16(&code_units).map_err(|error| {
-        WinedroidError::with_source("DEX MUTF-8 string is not valid UTF-16", error)
-    })
+    // cite: art utf.cc#ConvertModifiedUtf8ToUtf16
+    Ok(String::from_utf16_lossy(&code_units))
 }
 
 fn require_mutf8_continuation(byte: u8, offset: usize) -> Result<()> {

@@ -432,8 +432,11 @@ impl DexProgram {
             return Some(DexExecutionResult::Int(value));
         }
 
-        if method.class_descriptor == "Landroid/app/Activity;"
-            && method.name == "registerActivityLifecycleCallbacks"
+        // cite: frameworks-base Application.java#registerActivityLifecycleCallbacks
+        if matches!(
+            method.class_descriptor.as_str(),
+            "Landroid/app/Activity;" | "Landroid/app/Application;"
+        ) && method.name == "registerActivityLifecycleCallbacks"
             && method.proto.descriptor()
                 == "(Landroid/app/Application$ActivityLifecycleCallbacks;)V"
         {
@@ -992,10 +995,112 @@ impl DexProgram {
             return Some(DexExecutionResult::Value(DexValue::Float(60.0)));
         }
 
+        // cite: frameworks-base Display.java#getMetrics, getRealMetrics
+        if method.class_descriptor == "Landroid/view/Display;"
+            && matches!(method.name.as_str(), "getMetrics" | "getRealMetrics")
+            && method
+                .proto
+                .descriptor_is("(Landroid/util/DisplayMetrics;)V")
+        {
+            let invocation = invocation?;
+            let metrics = invocation.arguments.get(1)?;
+            let size = self.display_size();
+            self.write_stored_instance_field_by_signature(
+                metrics,
+                "Landroid/util/DisplayMetrics;.widthPixels:I",
+                DexValue::Int(size.width_i32()),
+            );
+            self.write_stored_instance_field_by_signature(
+                metrics,
+                "Landroid/util/DisplayMetrics;.heightPixels:I",
+                DexValue::Int(size.height_i32()),
+            );
+            self.write_stored_instance_field_by_signature(
+                metrics,
+                "Landroid/util/DisplayMetrics;.density:F",
+                DexValue::Float(1.0),
+            );
+            self.write_stored_instance_field_by_signature(
+                metrics,
+                "Landroid/util/DisplayMetrics;.scaledDensity:F",
+                DexValue::Float(1.0),
+            );
+            self.write_stored_instance_field_by_signature(
+                metrics,
+                "Landroid/util/DisplayMetrics;.densityDpi:I",
+                DexValue::Int(160),
+            );
+            self.write_stored_instance_field_by_signature(
+                metrics,
+                "Landroid/util/DisplayMetrics;.xdpi:F",
+                DexValue::Float(160.0),
+            );
+            self.write_stored_instance_field_by_signature(
+                metrics,
+                "Landroid/util/DisplayMetrics;.ydpi:F",
+                DexValue::Float(160.0),
+            );
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base DisplayMetrics.java#DisplayMetrics
+        if method.class_descriptor == "Landroid/util/DisplayMetrics;"
+            && method.name == "<init>"
+            && method.proto.descriptor_is("()V")
+        {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base DisplayManager.java#getStableDisplaySize
+        if method.class_descriptor == "Landroid/hardware/display/DisplayManager;"
+            && method.name == "getStableDisplaySize"
+            && method.proto.descriptor_is("()Landroid/graphics/Point;")
+        {
+            let size = self.display_size();
+            let point = self.allocate_object("Landroid/graphics/Point;".to_owned());
+            self.write_stored_instance_field_by_signature(
+                &point,
+                "Landroid/graphics/Point;.x:I",
+                DexValue::Int(size.width_i32()),
+            );
+            self.write_stored_instance_field_by_signature(
+                &point,
+                "Landroid/graphics/Point;.y:I",
+                DexValue::Int(size.height_i32()),
+            );
+            return Some(DexExecutionResult::Value(point));
+        }
+
         if method.class_descriptor == "Landroid/graphics/Point;"
             && method.name == "<init>"
             && method.proto.descriptor_is("()V")
         {
+            return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base Point.java#Point
+        if method.class_descriptor == "Landroid/graphics/Point;"
+            && method.name == "<init>"
+            && method.proto.descriptor_is("(II)V")
+        {
+            let invocation = invocation?;
+            let point = invocation.arguments.first()?;
+            let DexValue::Int(x) = invocation.arguments.get(1)? else {
+                return None;
+            };
+            let DexValue::Int(y) = invocation.arguments.get(2)? else {
+                return None;
+            };
+            self.write_stored_instance_field_by_signature(
+                point,
+                "Landroid/graphics/Point;.x:I",
+                DexValue::Int(*x),
+            );
+            self.write_stored_instance_field_by_signature(
+                point,
+                "Landroid/graphics/Point;.y:I",
+                DexValue::Int(*y),
+            );
             return Some(DexExecutionResult::Void);
         }
 

@@ -6,6 +6,7 @@ impl DexProgram {
         method: &DexMethodId,
         invocation: Option<&DexInvocation>,
     ) -> Option<DexExecutionResult> {
+        // cite: frameworks-base View.java#View
         if is_bootstrap_view_constructor_class(&method.class_descriptor)
             && method.name == "<init>"
             && matches!(
@@ -16,6 +17,34 @@ impl DexProgram {
                     | "(Landroid/content/Context;Landroid/util/AttributeSet;II)V"
             )
         {
+            if let Some(invocation) = invocation {
+                if let (Some(receiver), Some(attrs)) =
+                    (invocation.arguments.first(), invocation.arguments.get(2))
+                {
+                    let attrs_key = map_identity_key(attrs);
+                    let parsed_id =
+                        self.runtime
+                            .borrow()
+                            .xml_parsers
+                            .get(&attrs_key)
+                            .and_then(|parser| match parser.position {
+                                XmlParserPosition::Event(index) => match parser.events.get(index) {
+                                    Some(crate::binary_xml::XmlEvent::Start(element)) => {
+                                        xml_element_view_id(element)
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            });
+                    if let Some(view_id) = parsed_id {
+                        self.write_stored_instance_field(
+                            receiver,
+                            &view_id_field(),
+                            DexValue::Int(view_id),
+                        );
+                    }
+                }
+            }
             return Some(DexExecutionResult::Void);
         }
 

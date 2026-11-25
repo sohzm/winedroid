@@ -35,13 +35,58 @@ impl DexProgram {
             )));
         }
 
+        // cite: frameworks-base LayoutInflater.java#setFactory2
         if method.class_descriptor == "Landroid/view/LayoutInflater;"
             && method.name == "setFactory2"
             && method
                 .proto
                 .descriptor_is("(Landroid/view/LayoutInflater$Factory2;)V")
         {
+            if let Some(invocation) = invocation {
+                if let (Some(receiver), Some(factory)) =
+                    (invocation.arguments.first(), invocation.arguments.get(1))
+                {
+                    self.write_stored_instance_field(
+                        receiver,
+                        &DexFieldId {
+                            class_descriptor: "Landroid/view/LayoutInflater;".to_owned(),
+                            type_descriptor: "Landroid/view/LayoutInflater$Factory2;".to_owned(),
+                            name: "mFactory2".to_owned(),
+                        },
+                        factory.clone(),
+                    );
+                }
+            }
             return Some(DexExecutionResult::Void);
+        }
+
+        // cite: frameworks-base LayoutInflater.java#getFactory2
+        if method.class_descriptor == "Landroid/view/LayoutInflater;"
+            && method.name == "getFactory2"
+            && method
+                .proto
+                .descriptor_is("()Landroid/view/LayoutInflater$Factory2;")
+        {
+            let invocation = invocation?;
+            let factory = self
+                .read_stored_instance_field(
+                    invocation.arguments.first()?,
+                    &DexFieldId {
+                        class_descriptor: "Landroid/view/LayoutInflater;".to_owned(),
+                        type_descriptor: "Landroid/view/LayoutInflater$Factory2;".to_owned(),
+                        name: "mFactory2".to_owned(),
+                    },
+                )
+                .unwrap_or(DexValue::Null);
+            return Some(DexExecutionResult::Value(factory));
+        }
+
+        // cite: frameworks-base LayoutInflater.java#getContext
+        if method.class_descriptor == "Landroid/view/LayoutInflater;"
+            && method.name == "getContext"
+            && method.proto.descriptor_is("()Landroid/content/Context;")
+        {
+            return Some(DexExecutionResult::Value(self.active_context_value()));
         }
 
         if method.class_descriptor == "Landroid/view/LayoutInflater;"

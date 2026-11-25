@@ -195,11 +195,11 @@ impl DexProgram {
         if method.class_descriptor == "Landroidx/appcompat/app/AppCompatDelegate;"
             && matches!(
                 method.name.as_str(),
-                "onStart" | "onStop" | "onPostResume" | "onDestroy"
+                "onStart" | "onStop" | "onPostResume" | "onDestroy" | "invalidateOptionsMenu"
             )
             && method.proto.descriptor_is("()V")
         {
-            // cite: androidx AppCompatDelegateImpl.java#onStart, onStop, onPostResume, onDestroy
+            // cite: androidx AppCompatDelegateImpl.java#onStart, onStop, onPostResume, onDestroy, invalidateOptionsMenu
             return Some(DexExecutionResult::Void);
         }
 
